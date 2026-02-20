@@ -48,6 +48,27 @@ class LoggingConfig:
 
 
 @dataclass
+class AutoEyeConfig:
+    enabled: bool
+    symbols: list[str]
+    timeframes: list[str]
+    elements: list[str]
+    history_days: int
+    history_buffer_days: int
+    incremental_bars: int
+    update_interval_seconds: int
+    output_json: str
+    output_csv: str
+    state_json: str
+    min_gap_points: float
+    require_displacement: bool
+    displacement_k: float
+    atr_period: int
+    median_body_period: int
+    fill_rule: str
+
+
+@dataclass
 class AppConfig:
     url: str
     browser: BrowserConfig
@@ -55,6 +76,7 @@ class AppConfig:
     metatrader: MetaTraderConfig
     telegram: TelegramConfig
     logging: LoggingConfig
+    auto_eye: AutoEyeConfig
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -67,6 +89,7 @@ def load_config(config_path: Path) -> AppConfig:
     metatrader = raw.get("metatrader", {})
     telegram = raw.get("telegram", {})
     logging_raw = raw.get("logging", {})
+    auto_eye_raw = raw.get("auto_eye", {})
 
     raw_assets = scraper.get("assets", [])
     assets: list[str] = []
@@ -126,6 +149,40 @@ def load_config(config_path: Path) -> AppConfig:
         if user_id not in allowed_user_ids:
             allowed_user_ids.append(user_id)
 
+    auto_eye_symbols: list[str] = []
+    auto_eye_raw_symbols = auto_eye_raw.get("symbols", [])
+    if isinstance(auto_eye_raw_symbols, list):
+        for symbol in auto_eye_raw_symbols:
+            normalized_symbol = str(symbol).strip().upper()
+            if normalized_symbol:
+                auto_eye_symbols.append(normalized_symbol)
+    if not auto_eye_symbols:
+        auto_eye_symbols = list(assets)
+
+    auto_eye_timeframes: list[str] = []
+    raw_timeframes = auto_eye_raw.get("timeframes", ["M5"])
+    if isinstance(raw_timeframes, list):
+        for timeframe in raw_timeframes:
+            normalized_timeframe = str(timeframe).strip().upper()
+            if normalized_timeframe:
+                auto_eye_timeframes.append(normalized_timeframe)
+    if not auto_eye_timeframes:
+        auto_eye_timeframes = ["M5"]
+
+    auto_eye_elements: list[str] = []
+    raw_elements = auto_eye_raw.get("elements", ["fvg"])
+    if isinstance(raw_elements, list):
+        for element in raw_elements:
+            normalized_element = str(element).strip().lower()
+            if normalized_element and normalized_element not in auto_eye_elements:
+                auto_eye_elements.append(normalized_element)
+    if not auto_eye_elements:
+        auto_eye_elements = ["fvg"]
+
+    fill_rule = str(auto_eye_raw.get("fill_rule", "both")).strip().lower()
+    if fill_rule not in {"touch", "full", "both"}:
+        fill_rule = "both"
+
     return AppConfig(
         url=str(site.get("url", "")),
         browser=BrowserConfig(
@@ -157,5 +214,26 @@ def load_config(config_path: Path) -> AppConfig:
             file=str(logging_raw.get("file", "logs/notify.log")),
             max_bytes=int(logging_raw.get("max_bytes", 5_000_000)),
             backup_count=int(logging_raw.get("backup_count", 5)),
+        ),
+        auto_eye=AutoEyeConfig(
+            enabled=bool(auto_eye_raw.get("enabled", True)),
+            symbols=auto_eye_symbols,
+            timeframes=auto_eye_timeframes,
+            elements=auto_eye_elements,
+            history_days=max(1, int(auto_eye_raw.get("history_days", 30))),
+            history_buffer_days=max(0, int(auto_eye_raw.get("history_buffer_days", 5))),
+            incremental_bars=max(20, int(auto_eye_raw.get("incremental_bars", 500))),
+            update_interval_seconds=max(
+                10, int(auto_eye_raw.get("update_interval_seconds", 300))
+            ),
+            output_json=str(auto_eye_raw.get("output_json", "output/auto_eye_zones.json")),
+            output_csv=str(auto_eye_raw.get("output_csv", "output/auto_eye_zones.csv")),
+            state_json=str(auto_eye_raw.get("state_json", "output/auto_eye_state.json")),
+            min_gap_points=float(auto_eye_raw.get("min_gap_points", 0)),
+            require_displacement=bool(auto_eye_raw.get("require_displacement", False)),
+            displacement_k=float(auto_eye_raw.get("displacement_k", 1.5)),
+            atr_period=max(1, int(auto_eye_raw.get("atr_period", 14))),
+            median_body_period=max(1, int(auto_eye_raw.get("median_body_period", 20))),
+            fill_rule=fill_rule,
         ),
     )
