@@ -35,6 +35,8 @@ CALLBACK_ALERT_ASSET_PREFIX = "alerts_asset|"
 CALLBACK_PRICE_SET_PREFIX = "price_set|"
 CALLBACK_TIME_QUICK_PREFIX = "time_q|"
 CALLBACK_TIME_CUSTOM_PREFIX = "time_c|"
+CALLBACK_PRICE_TIME_HOLD_PREFIX = "pth|"
+CALLBACK_PRICE_TIME_CLOSE_PREFIX = "ptc|"
 CALLBACK_DELETE_ASSET_PREFIX = "del_asset|"
 CALLBACK_DELETE_ONE_HOME_PREFIX = "del_h|"
 CALLBACK_DELETE_ONE_ASSET_PREFIX = "del_a|"
@@ -44,13 +46,26 @@ CALLBACK_RENEW_TIME_PREFIX = "renew_t|"
 
 ALERT_KIND_PRICE = "price"
 ALERT_KIND_TIME = "time"
+ALERT_KIND_PRICE_TIME = "price_time"
 
 DIRECTION_ABOVE = "above"
 DIRECTION_BELOW = "below"
+PRICE_TIME_MODE_HOLD = "hold"
+PRICE_TIME_MODE_CANDLE_CLOSE = "candle_close"
 
 TIMEFRAME_M15 = "m15"
 TIMEFRAME_H1 = "h1"
 TIMEFRAME_H4 = "h4"
+TIMEFRAME_D1 = "d1"
+TIMEFRAME_W1 = "w1"
+# "m1" here means monthly timeframe label M1 in TradingView context.
+TIMEFRAME_M1 = "m1"
+
+HOLD_TIMEFRAME_MINUTES = {
+    TIMEFRAME_M15: 15,
+    TIMEFRAME_H1: 60,
+    TIMEFRAME_H4: 240,
+}
 
 USER_TIMEZONE = timezone(timedelta(hours=5))
 USER_TIMEZONE_LABEL = "GMT+5"
@@ -87,6 +102,9 @@ class AlertRule:
     target: float | None = None
     trigger_at_utc: str | None = None
     delay_minutes: int | None = None
+    price_time_mode: str | None = None
+    timeframe_code: str | None = None
+    condition_started_at_utc: str | None = None
 
 
 @dataclass
@@ -192,6 +210,64 @@ class AlertStore:
                 delay_minutes=delay_minutes,
                 created_at_utc=created_at_utc,
             )
+
+        if kind == ALERT_KIND_PRICE_TIME:
+            direction = str(item.get("direction", "")).strip().lower()
+            target_raw = item.get("target")
+            mode = str(item.get("price_time_mode", "")).strip().lower()
+            timeframe_code = str(item.get("timeframe_code", "")).strip().lower()
+            trigger_at_utc = str(item.get("trigger_at_utc", "")).strip() or None
+            condition_started_at_utc = (
+                str(item.get("condition_started_at_utc", "")).strip() or None
+            )
+
+            if direction not in {DIRECTION_ABOVE, DIRECTION_BELOW}:
+                return None
+            try:
+                target = float(target_raw)
+            except (TypeError, ValueError):
+                return None
+
+            if mode == PRICE_TIME_MODE_HOLD:
+                delay_raw = item.get("delay_minutes", 0)
+                try:
+                    delay_minutes = int(delay_raw)
+                except (TypeError, ValueError):
+                    return None
+
+                if delay_minutes <= 0 or not is_supported_hold_timeframe(timeframe_code):
+                    return None
+
+                return AlertRule(
+                    user_id=user_id,
+                    asset=asset,
+                    kind=ALERT_KIND_PRICE_TIME,
+                    direction=direction,
+                    target=target,
+                    delay_minutes=delay_minutes,
+                    price_time_mode=PRICE_TIME_MODE_HOLD,
+                    timeframe_code=timeframe_code,
+                    condition_started_at_utc=condition_started_at_utc,
+                    created_at_utc=created_at_utc,
+                )
+
+            if mode == PRICE_TIME_MODE_CANDLE_CLOSE:
+                if not is_supported_candle_timeframe(timeframe_code):
+                    return None
+
+                return AlertRule(
+                    user_id=user_id,
+                    asset=asset,
+                    kind=ALERT_KIND_PRICE_TIME,
+                    direction=direction,
+                    target=target,
+                    trigger_at_utc=trigger_at_utc,
+                    price_time_mode=PRICE_TIME_MODE_CANDLE_CLOSE,
+                    timeframe_code=timeframe_code,
+                    created_at_utc=created_at_utc,
+                )
+
+            return None
 
         # Backward compatibility with old price schema (no kind field).
         direction = str(item.get("direction", "")).strip().lower()
@@ -302,6 +378,70 @@ class AlertStore:
         )
         self.save()
 
+    def add_price_time(
+        self,
+        user_id: int,
+        asset: str,
+        direction: str,
+        target: float,
+        mode: str,
+        timeframe_code: str,
+        *,
+        delay_minutes: int | None = None,
+        trigger_at_utc: datetime | None = None,
+    ) -> None:
+        normalized_mode = mode.strip().lower()
+        normalized_timeframe = timeframe_code.strip().lower()
+
+        existing_filtered: list[AlertRule] = []
+        for alert in self.alerts:
+            same_rule = (
+                alert.user_id == user_id
+                and alert.asset == asset
+                and alert.kind == ALERT_KIND_PRICE_TIME
+                and alert.direction == direction
+                and float(alert.target or 0.0) == float(target)
+                and alert.price_time_mode == normalized_mode
+                and (alert.timeframe_code or "").lower() == normalized_timeframe
+            )
+            if same_rule:
+                continue
+            existing_filtered.append(alert)
+        self.alerts = existing_filtered
+
+        trigger_iso: str | None = None
+        if trigger_at_utc is not None:
+            trigger_iso = trigger_at_utc.astimezone(timezone.utc).isoformat()
+
+        self.alerts.append(
+            AlertRule(
+                user_id=user_id,
+                asset=asset,
+                kind=ALERT_KIND_PRICE_TIME,
+                direction=direction,
+                target=target,
+                delay_minutes=delay_minutes,
+                trigger_at_utc=trigger_iso,
+                price_time_mode=normalized_mode,
+                timeframe_code=normalized_timeframe,
+                condition_started_at_utc=None,
+                created_at_utc=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+        logger.info(
+            "Add price-time alert user_id=%s asset=%s direction=%s target=%s mode=%s timeframe=%s delay_minutes=%s trigger_at_utc=%s",
+            user_id,
+            asset,
+            direction,
+            target,
+            normalized_mode,
+            normalized_timeframe,
+            delay_minutes,
+            trigger_iso,
+        )
+        self.save()
+
     def remove_asset_alerts(self, user_id: int, asset: str) -> int:
         before = len(self.alerts)
         self.alerts = [
@@ -359,6 +499,7 @@ class AlertStore:
         now_utc = datetime.now(timezone.utc)
         triggered: list[TriggeredAlert] = []
         active: list[AlertRule] = []
+        has_state_changes = False
 
         for alert in self.alerts:
             if alert.kind == ALERT_KIND_PRICE:
@@ -370,13 +511,7 @@ class AlertStore:
                     active.append(alert)
                     continue
 
-                if alert.direction == DIRECTION_ABOVE and current_value > alert.target:
-                    triggered.append(
-                        TriggeredAlert(alert=alert, current_value_text=current_text)
-                    )
-                    continue
-
-                if alert.direction == DIRECTION_BELOW and current_value < alert.target:
+                if compare_by_direction(current_value, alert.direction, alert.target):
                     triggered.append(
                         TriggeredAlert(alert=alert, current_value_text=current_text)
                     )
@@ -412,9 +547,94 @@ class AlertStore:
                 active.append(alert)
                 continue
 
+            if alert.kind == ALERT_KIND_PRICE_TIME:
+                record = quotes.get(alert.asset, {})
+                current_text = str(record.get("value") or "").strip()
+                current_value = parse_price(current_text)
+
+                if (
+                    current_value is None
+                    or alert.target is None
+                    or alert.direction not in {DIRECTION_ABOVE, DIRECTION_BELOW}
+                    or not alert.price_time_mode
+                    or not alert.timeframe_code
+                ):
+                    active.append(alert)
+                    continue
+
+                condition_met = compare_by_direction(
+                    current_value,
+                    alert.direction,
+                    alert.target,
+                )
+
+                if alert.price_time_mode == PRICE_TIME_MODE_HOLD:
+                    hold_minutes = max(1, int(alert.delay_minutes or 0))
+
+                    if condition_met:
+                        started_at = parse_utc_iso(alert.condition_started_at_utc or "")
+                        if started_at is None:
+                            alert.condition_started_at_utc = now_utc.isoformat()
+                            has_state_changes = True
+                            active.append(alert)
+                            continue
+
+                        if now_utc >= started_at + timedelta(minutes=hold_minutes):
+                            triggered.append(
+                                TriggeredAlert(alert=alert, current_value_text=current_text)
+                            )
+                            continue
+
+                        active.append(alert)
+                        continue
+
+                    if alert.condition_started_at_utc:
+                        alert.condition_started_at_utc = None
+                        has_state_changes = True
+                    active.append(alert)
+                    continue
+
+                if alert.price_time_mode == PRICE_TIME_MODE_CANDLE_CLOSE:
+                    trigger_at = parse_utc_iso(alert.trigger_at_utc or "")
+                    if trigger_at is None:
+                        logger.warning("Invalid trigger_at_utc in price_time alert: %s", alert)
+                        active.append(alert)
+                        continue
+
+                    if now_utc >= trigger_at:
+                        if condition_met:
+                            triggered.append(
+                                TriggeredAlert(alert=alert, current_value_text=current_text)
+                            )
+                            continue
+
+                        next_trigger = advance_candle_close_utc(
+                            trigger_at,
+                            alert.timeframe_code,
+                        )
+                        while next_trigger is not None and next_trigger <= now_utc:
+                            next_trigger = advance_candle_close_utc(
+                                next_trigger,
+                                alert.timeframe_code,
+                            )
+                        if next_trigger is None:
+                            active.append(alert)
+                            continue
+
+                        alert.trigger_at_utc = next_trigger.isoformat()
+                        has_state_changes = True
+                        active.append(alert)
+                        continue
+
+                    active.append(alert)
+                    continue
+
+                active.append(alert)
+                continue
+
             active.append(alert)
 
-        if len(active) != len(self.alerts):
+        if len(active) != len(self.alerts) or has_state_changes:
             self.alerts = active
             self.save()
 
@@ -424,10 +644,45 @@ class AlertStore:
 
 def direction_label(direction: str) -> str:
     if direction == DIRECTION_ABOVE:
-        return "выше"
+        return "≥"
     if direction == DIRECTION_BELOW:
-        return "ниже"
+        return "≤"
     return direction
+
+
+def direction_human(direction: str) -> str:
+    if direction == DIRECTION_ABOVE:
+        return "выше или равна"
+    if direction == DIRECTION_BELOW:
+        return "ниже или равна"
+    return direction
+
+
+def compare_by_direction(current_value: float, direction: str, target: float) -> bool:
+    if direction == DIRECTION_ABOVE:
+        return current_value >= target
+    if direction == DIRECTION_BELOW:
+        return current_value <= target
+    return False
+
+
+def parse_direction_target(text: str) -> tuple[str, float] | None:
+    match = re.fullmatch(r"\s*(>=|<=|>|<)\s*(.+?)\s*", text)
+    if match is None:
+        return None
+
+    raw_op = match.group(1)
+    raw_target = match.group(2)
+    target = parse_price(raw_target)
+    if target is None:
+        return None
+
+    if raw_op in {">=", ">"}:
+        direction = DIRECTION_ABOVE
+    else:
+        direction = DIRECTION_BELOW
+
+    return direction, target
 
 
 def parse_price(text: str) -> float | None:
@@ -486,6 +741,29 @@ def render_alert_line(alert: AlertRule) -> str:
         when = format_local_datetime(alert.trigger_at_utc)
         return f"• <code>{html.escape(alert.asset)}</code>: по времени <b>{html.escape(when)}</b>"
 
+    if alert.kind == ALERT_KIND_PRICE_TIME:
+        if alert.target is None or alert.direction is None:
+            return f"• <code>{html.escape(alert.asset)}</code>: некорректный price+time алерт"
+
+        mode = alert.price_time_mode or ""
+        tf = timeframe_label(alert.timeframe_code or "")
+        condition = (
+            f"{direction_label(alert.direction)} <b>{format_target(alert.target)}</b>"
+        )
+        if mode == PRICE_TIME_MODE_HOLD:
+            return (
+                f"• <code>{html.escape(alert.asset)}</code>: "
+                f"удержание {html.escape(tf)} при {condition}"
+            )
+        if mode == PRICE_TIME_MODE_CANDLE_CLOSE:
+            next_when = format_local_datetime(alert.trigger_at_utc)
+            return (
+                f"• <code>{html.escape(alert.asset)}</code>: "
+                f"закрытие {html.escape(tf)} при {condition} "
+                f"(след. проверка: <b>{html.escape(next_when)}</b>)"
+            )
+        return f"• <code>{html.escape(alert.asset)}</code>: price+time {condition}"
+
     return f"• <code>{html.escape(alert.asset)}</code>: неизвестный алерт"
 
 
@@ -503,7 +781,7 @@ def parse_alert_selector(selector: str) -> tuple[str, str, str] | None:
         return None
 
     asset, kind, created_at_utc = parts
-    if not asset or kind not in {ALERT_KIND_PRICE, ALERT_KIND_TIME}:
+    if not asset or kind not in {ALERT_KIND_PRICE, ALERT_KIND_TIME, ALERT_KIND_PRICE_TIME}:
         return None
 
     return asset, kind, created_at_utc
@@ -521,7 +799,45 @@ def format_alert_button_text(alert: AlertRule, *, include_asset: bool) -> str:
         local_time = format_local_datetime(alert.trigger_at_utc)
         return f"❌ {prefix}{local_time}".strip()
 
+    if alert.kind == ALERT_KIND_PRICE_TIME:
+        direction = direction_label(alert.direction or "")
+        value = format_target(alert.target or 0.0)
+        tf_label = timeframe_label(alert.timeframe_code or "")
+        mode_label = (
+            "удержание"
+            if alert.price_time_mode == PRICE_TIME_MODE_HOLD
+            else "закрытие"
+        )
+        return f"❌ {prefix}{mode_label} {tf_label}: {direction} {value}".strip()
+
     return f"❌ {prefix}unknown".strip()
+
+
+def timeframe_label(timeframe_code: str) -> str:
+    mapping = {
+        TIMEFRAME_M15: "M15",
+        TIMEFRAME_H1: "H1",
+        TIMEFRAME_H4: "H4",
+        TIMEFRAME_D1: "D1",
+        TIMEFRAME_W1: "W1",
+        TIMEFRAME_M1: "M1",
+    }
+    return mapping.get(timeframe_code.lower(), timeframe_code.upper())
+
+
+def is_supported_candle_timeframe(timeframe_code: str) -> bool:
+    return timeframe_code in {
+        TIMEFRAME_M15,
+        TIMEFRAME_H1,
+        TIMEFRAME_H4,
+        TIMEFRAME_D1,
+        TIMEFRAME_W1,
+        TIMEFRAME_M1,
+    }
+
+
+def is_supported_hold_timeframe(timeframe_code: str) -> bool:
+    return timeframe_code in HOLD_TIMEFRAME_MINUTES
 
 
 def parse_hhmm_to_minutes(value: str) -> int:
@@ -675,20 +991,60 @@ def next_h4_close_for_group(now_local: datetime, h4_start_minutes: int) -> datet
     return midnight + timedelta(days=days_add, minutes=minute_of_day)
 
 
-def compute_timeframe_trigger_utc(
-    state: BotState, asset: str, timeframe_code: str
-) -> tuple[datetime, int, str]:
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(USER_TIMEZONE)
+def next_d1_close(now_local: datetime) -> datetime:
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    candidate = midnight + timedelta(days=1)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate
 
-    if timeframe_code == TIMEFRAME_M15:
+
+def next_w1_close(now_local: datetime) -> datetime:
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_until_monday = (7 - midnight.weekday()) % 7
+    candidate = midnight + timedelta(days=days_until_monday)
+    if candidate <= now_local:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def next_m1_close(now_local: datetime) -> datetime:
+    year = now_local.year
+    month = now_local.month
+
+    if month == 12:
+        year += 1
+        month = 1
+    else:
+        month += 1
+
+    candidate = datetime(year, month, 1, tzinfo=now_local.tzinfo)
+    if candidate <= now_local:
+        if month == 12:
+            candidate = datetime(year + 1, 1, 1, tzinfo=now_local.tzinfo)
+        else:
+            candidate = datetime(year, month + 1, 1, tzinfo=now_local.tzinfo)
+    return candidate
+
+
+def compute_timeframe_trigger_utc(
+    state: BotState,
+    asset: str,
+    timeframe_code: str,
+    *,
+    now_utc: datetime | None = None,
+) -> tuple[datetime, int, str]:
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(USER_TIMEZONE)
+    normalized_timeframe = timeframe_code.lower()
+    group = detect_asset_market_group(asset, state.timeframe_rules)
+
+    if normalized_timeframe == TIMEFRAME_M15:
         trigger_local = next_interval_close(now_local, interval_minutes=15)
-        group = "forex"
-    elif timeframe_code == TIMEFRAME_H1:
+    elif normalized_timeframe == TIMEFRAME_H1:
         trigger_local = next_interval_close(now_local, interval_minutes=60)
-        group = "forex"
-    elif timeframe_code == TIMEFRAME_H4:
-        group = detect_asset_market_group(asset, state.timeframe_rules)
+    elif normalized_timeframe == TIMEFRAME_H4:
         h4_start = state.timeframe_rules.h4_start_minutes_by_group.get(
             group,
             state.timeframe_rules.h4_start_minutes_by_group.get(
@@ -697,12 +1053,44 @@ def compute_timeframe_trigger_utc(
             ),
         )
         trigger_local = next_h4_close_for_group(now_local, h4_start)
+    elif normalized_timeframe == TIMEFRAME_D1:
+        trigger_local = next_d1_close(now_local)
+    elif normalized_timeframe == TIMEFRAME_W1:
+        trigger_local = next_w1_close(now_local)
+    elif normalized_timeframe == TIMEFRAME_M1:
+        trigger_local = next_m1_close(now_local)
     else:
         raise ValueError(f"Unsupported timeframe code: {timeframe_code}")
 
     trigger_utc = trigger_local.astimezone(timezone.utc)
     delay_minutes = max(1, math.ceil((trigger_utc - now_utc).total_seconds() / 60))
     return trigger_utc, delay_minutes, group
+
+
+def advance_candle_close_utc(
+    previous_trigger_utc: datetime,
+    timeframe_code: str | None,
+) -> datetime | None:
+    if timeframe_code is None:
+        return None
+
+    code = timeframe_code.lower()
+    if code == TIMEFRAME_M15:
+        return previous_trigger_utc + timedelta(minutes=15)
+    if code == TIMEFRAME_H1:
+        return previous_trigger_utc + timedelta(hours=1)
+    if code == TIMEFRAME_H4:
+        return previous_trigger_utc + timedelta(hours=4)
+    if code == TIMEFRAME_D1:
+        return previous_trigger_utc + timedelta(days=1)
+    if code == TIMEFRAME_W1:
+        return previous_trigger_utc + timedelta(days=7)
+    if code == TIMEFRAME_M1:
+        after_prev_local = (previous_trigger_utc + timedelta(seconds=1)).astimezone(
+            USER_TIMEZONE
+        )
+        return next_m1_close(after_prev_local).astimezone(timezone.utc)
+    return None
 
 
 def classify_asset_group(asset: str) -> str:
@@ -809,27 +1197,75 @@ def build_asset_alert_keyboard(asset: str, asset_alerts: list[AlertRule]) -> Inl
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="Цена выше",
+                text="Цена ≥",
                 callback_data=f"{CALLBACK_PRICE_SET_PREFIX}{asset}|{DIRECTION_ABOVE}",
             ),
             InlineKeyboardButton(
-                text="Цена ниже",
+                text="Цена ≤",
                 callback_data=f"{CALLBACK_PRICE_SET_PREFIX}{asset}|{DIRECTION_BELOW}",
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Закрытие M15",
+                text="Цена+время удерж. M15",
+                callback_data=f"{CALLBACK_PRICE_TIME_HOLD_PREFIX}{asset}|{TIMEFRAME_M15}",
+            ),
+            InlineKeyboardButton(
+                text="Цена+время удерж. H1",
+                callback_data=f"{CALLBACK_PRICE_TIME_HOLD_PREFIX}{asset}|{TIMEFRAME_H1}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Цена+время удерж. H4",
+                callback_data=f"{CALLBACK_PRICE_TIME_HOLD_PREFIX}{asset}|{TIMEFRAME_H4}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Цена+время закр. M15",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_M15}",
+            ),
+            InlineKeyboardButton(
+                text="Цена+время закр. H1",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_H1}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Цена+время закр. H4",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_H4}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Цена+время закр. D1",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_D1}",
+            ),
+            InlineKeyboardButton(
+                text="Цена+время закр. W1",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_W1}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Цена+время закр. M1",
+                callback_data=f"{CALLBACK_PRICE_TIME_CLOSE_PREFIX}{asset}|{TIMEFRAME_M1}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Таймер M15",
                 callback_data=f"{CALLBACK_TIME_QUICK_PREFIX}{asset}|{TIMEFRAME_M15}",
             ),
             InlineKeyboardButton(
-                text="Закрытие H1",
+                text="Таймер H1",
                 callback_data=f"{CALLBACK_TIME_QUICK_PREFIX}{asset}|{TIMEFRAME_H1}",
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Закрытие H4",
+                text="Таймер H4",
                 callback_data=f"{CALLBACK_TIME_QUICK_PREFIX}{asset}|{TIMEFRAME_H4}",
             )
         ],
@@ -1169,13 +1605,30 @@ async def refresh_quotes_and_alerts(
                 f"<b>{format_target(alert.target or 0.0)}</b>\n"
                 f"<b>Текущая цена:</b> <b>{html.escape(event.current_value_text)}</b>"
             )
-        else:
+        elif alert.kind == ALERT_KIND_TIME:
             text = (
                 "<b>Сработал алерт</b>\n"
                 "<b>Тип:</b> время\n"
                 f"<b>Актив:</b> <code>{html.escape(alert.asset)}</code>\n"
                 f"<b>Запланировано:</b> "
                 f"<b>{html.escape(format_local_datetime(alert.trigger_at_utc))}</b>\n"
+                f"<b>Текущая цена:</b> <b>{html.escape(event.current_value_text)}</b>"
+            )
+        else:
+            mode = alert.price_time_mode or ""
+            mode_text = (
+                "удержание"
+                if mode == PRICE_TIME_MODE_HOLD
+                else "закрытие свечи"
+            )
+            tf = timeframe_label(alert.timeframe_code or "")
+            text = (
+                "<b>Сработал алерт</b>\n"
+                "<b>Тип:</b> цена + время\n"
+                f"<b>Актив:</b> <code>{html.escape(alert.asset)}</code>\n"
+                f"<b>Режим:</b> {html.escape(mode_text)} {html.escape(tf)}\n"
+                f"<b>Условие:</b> {direction_label(alert.direction or '')} "
+                f"<b>{format_target(alert.target or 0.0)}</b>\n"
                 f"<b>Текущая цена:</b> <b>{html.escape(event.current_value_text)}</b>"
             )
 
@@ -1479,7 +1932,86 @@ def build_router(state: BotState) -> Router:
             text=(
                 f"<b>{html.escape(asset)}</b>\n"
                 f"Введите целевую цену.\n"
-                f"Условие: когда цена будет <b>{direction_label(direction)}</b> указанной отметки."
+                "Условие: когда цена будет "
+                f"<b>{direction_human(direction)}</b> указанной отметки."
+            ),
+            reply_markup=build_cancel_keyboard(),
+        )
+
+    @router.callback_query(F.data.startswith(CALLBACK_PRICE_TIME_HOLD_PREFIX))
+    async def price_time_hold_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        await query.answer()
+
+        data = query.data or ""
+        payload = data[len(CALLBACK_PRICE_TIME_HOLD_PREFIX) :]
+        parts = payload.split("|", maxsplit=1)
+        if len(parts) != 2:
+            logger.warning("Invalid price-time-hold callback payload: %s", data)
+            await edit_alerts_menu_message(query, state)
+            return
+
+        asset, timeframe_code = parts
+        if not is_supported_hold_timeframe(timeframe_code):
+            logger.warning("Unsupported hold timeframe payload: %s", data)
+            await edit_alerts_menu_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.pending_inputs[user_id] = {
+            "type": ALERT_KIND_PRICE_TIME,
+            "asset": asset,
+            "pt_mode": PRICE_TIME_MODE_HOLD,
+            "timeframe_code": timeframe_code,
+        }
+
+        await safe_edit_message(
+            query,
+            text=(
+                f"<b>{html.escape(asset)}</b>\n"
+                f"Условие для price+time (удержание {timeframe_label(timeframe_code)}).\n"
+                "Введите: <code>&gt;= 1.2345</code> или <code>&lt;= 1.2345</code>"
+            ),
+            reply_markup=build_cancel_keyboard(),
+        )
+
+    @router.callback_query(F.data.startswith(CALLBACK_PRICE_TIME_CLOSE_PREFIX))
+    async def price_time_close_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        await query.answer()
+
+        data = query.data or ""
+        payload = data[len(CALLBACK_PRICE_TIME_CLOSE_PREFIX) :]
+        parts = payload.split("|", maxsplit=1)
+        if len(parts) != 2:
+            logger.warning("Invalid price-time-close callback payload: %s", data)
+            await edit_alerts_menu_message(query, state)
+            return
+
+        asset, timeframe_code = parts
+        if not is_supported_candle_timeframe(timeframe_code):
+            logger.warning("Unsupported close timeframe payload: %s", data)
+            await edit_alerts_menu_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.pending_inputs[user_id] = {
+            "type": ALERT_KIND_PRICE_TIME,
+            "asset": asset,
+            "pt_mode": PRICE_TIME_MODE_CANDLE_CLOSE,
+            "timeframe_code": timeframe_code,
+        }
+
+        await safe_edit_message(
+            query,
+            text=(
+                f"<b>{html.escape(asset)}</b>\n"
+                f"Условие для price+time (закрытие {timeframe_label(timeframe_code)}).\n"
+                "Введите: <code>&gt;= 1.2345</code> или <code>&lt;= 1.2345</code>"
             ),
             reply_markup=build_cancel_keyboard(),
         )
@@ -1685,6 +2217,134 @@ def build_router(state: BotState) -> Router:
                 f"<code>{html.escape(asset)}</code>: "
                 f"{direction_label(direction)} <b>{format_target(target)}</b>"
             )
+            await send_alerts_menu_message(message, state)
+            return
+
+        if input_type == ALERT_KIND_PRICE_TIME:
+            parsed_condition = parse_direction_target(message.text or "")
+            mode = waiting.get("pt_mode", "")
+            timeframe_code = waiting.get("timeframe_code", "").lower()
+
+            if parsed_condition is None:
+                logger.warning(
+                    "Invalid price-time condition from user_id=%s text=%s",
+                    user_id,
+                    message.text,
+                )
+                await message.answer(
+                    "Не распознал условие.\n"
+                    "Используйте: <code>&gt;= 1.2456</code> или <code>&lt;= 1.2456</code>.",
+                    reply_markup=build_cancel_keyboard(),
+                )
+                return
+
+            direction, target = parsed_condition
+
+            if mode == PRICE_TIME_MODE_HOLD:
+                if not is_supported_hold_timeframe(timeframe_code):
+                    logger.warning(
+                        "Unsupported hold timeframe in pending input user_id=%s mode=%s timeframe=%s",
+                        user_id,
+                        mode,
+                        timeframe_code,
+                    )
+                    await message.answer(
+                        "Ошибка настройки алерта. Повторите создание через меню.",
+                    )
+                    state.pending_inputs.pop(user_id, None)
+                    await send_alerts_menu_message(message, state)
+                    return
+
+                hold_minutes = HOLD_TIMEFRAME_MINUTES[timeframe_code]
+                state.alert_store.add_price_time(
+                    user_id=user_id,
+                    asset=asset,
+                    direction=direction,
+                    target=target,
+                    mode=PRICE_TIME_MODE_HOLD,
+                    timeframe_code=timeframe_code,
+                    delay_minutes=hold_minutes,
+                )
+                state.pending_inputs.pop(user_id, None)
+
+                logger.info(
+                    "Price-time hold alert saved user_id=%s asset=%s direction=%s target=%s timeframe=%s hold_minutes=%s",
+                    user_id,
+                    asset,
+                    direction,
+                    target,
+                    timeframe_code,
+                    hold_minutes,
+                )
+
+                await message.answer(
+                    "<b>Price+Time алерт сохранен</b>\n"
+                    f"<code>{html.escape(asset)}</code>: удержание "
+                    f"<b>{html.escape(timeframe_label(timeframe_code))}</b>, "
+                    f"условие {direction_label(direction)} <b>{format_target(target)}</b>"
+                )
+                await send_alerts_menu_message(message, state)
+                return
+
+            if mode == PRICE_TIME_MODE_CANDLE_CLOSE:
+                if not is_supported_candle_timeframe(timeframe_code):
+                    logger.warning(
+                        "Unsupported close timeframe in pending input user_id=%s mode=%s timeframe=%s",
+                        user_id,
+                        mode,
+                        timeframe_code,
+                    )
+                    await message.answer(
+                        "Ошибка настройки алерта. Повторите создание через меню.",
+                    )
+                    state.pending_inputs.pop(user_id, None)
+                    await send_alerts_menu_message(message, state)
+                    return
+
+                trigger_at_utc, _, group = compute_timeframe_trigger_utc(
+                    state,
+                    asset,
+                    timeframe_code,
+                )
+                state.alert_store.add_price_time(
+                    user_id=user_id,
+                    asset=asset,
+                    direction=direction,
+                    target=target,
+                    mode=PRICE_TIME_MODE_CANDLE_CLOSE,
+                    timeframe_code=timeframe_code,
+                    trigger_at_utc=trigger_at_utc,
+                )
+                state.pending_inputs.pop(user_id, None)
+
+                logger.info(
+                    "Price-time close alert saved user_id=%s asset=%s direction=%s target=%s timeframe=%s group=%s trigger_at_utc=%s",
+                    user_id,
+                    asset,
+                    direction,
+                    target,
+                    timeframe_code,
+                    group,
+                    trigger_at_utc.isoformat(),
+                )
+
+                await message.answer(
+                    "<b>Price+Time алерт сохранен</b>\n"
+                    f"<code>{html.escape(asset)}</code>: закрытие "
+                    f"<b>{html.escape(timeframe_label(timeframe_code))}</b>, "
+                    f"условие {direction_label(direction)} <b>{format_target(target)}</b>\n"
+                    f"Следующая проверка: <b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>"
+                )
+                await send_alerts_menu_message(message, state)
+                return
+
+            logger.warning(
+                "Unknown price-time mode in pending input user_id=%s mode=%s",
+                user_id,
+                mode,
+            )
+            await message.answer("Ошибка настройки алерта. Повторите через меню.")
+            state.pending_inputs.pop(user_id, None)
             await send_alerts_menu_message(message, state)
             return
 
