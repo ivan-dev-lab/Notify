@@ -1,0 +1,85 @@
+{
+  "generated_at_utc": "2026-02-20T09:29:21.440498+00:00",
+  "source": "metatrader5",
+  "source_server": "",
+  "quotes": {
+    "GBPUSD": {
+      "pair": "GBPUSD",
+      "value": "1.34639",
+      "bid": "1.34637",
+      "ask": "1.3464"
+    },
+    "GBPCHF": {
+      "pair": "GBPCHF",
+      "value": "1.04378",
+      "bid": "1.04367",
+      "ask": "1.04388"
+    },
+    "GBPAUD": {
+      "pair": "GBPAUD",
+      "value": "1.90597",
+      "bid": "1.90591",
+      "ask": "1.90604"
+    },
+    "USDCAD": {
+      "pair": "USDCAD",
+      "value": "1.3685",
+      "bid": "1.36848",
+      "ask": "1.36853"
+    },
+    "USDCHF": {
+      "pair": "USDCHF",
+      "value": "0.7752",
+      "bid": "0.77518",
+      "ask": "0.77523"
+    },
+    "EURGBP": {
+      "pair": "EURGBP",
+      "value": "0.87397",
+      "bid": "0.87396",
+      "ask": "0.87399"
+    },
+    "EURAUD": {
+      "pair": "EURAUD",
+      "value": "1.66581",
+      "bid": "1.66573",
+      "ask": "1.66589"
+    },
+    "AUDJPY": {
+      "pair": "AUDJPY",
+      "value": "109.799",
+      "bid": "109.793",
+      "ask": "109.806"
+    },
+    "AUDNZD": {
+      "pair": "AUDNZD",
+      "value": "1.1846",
+      "bid": "1.18451",
+      "ask": "1.1847"
+    },
+    "NZDJPY": {
+      "pair": "NZDJPY",
+      "value": "92.691",
+      "bid": "92.685",
+      "ask": "92.697"
+    },
+    "GER40": {
+      "pair": "GER40",
+      "value": "25118.3",
+      "bid": "25117.3",
+      "ask": "25119.3"
+    },
+    "SPX500": {
+      "pair": "SPX500",
+      "value": "6887.38",
+      "bid": "6886.98",
+      "ask": "6887.78"
+    },
+    "NDX100": {
+      "pair": "NDX100",
+      "value": "24916.38",
+      "bid": "24915.58",
+      "ask": "24917.18"
+    }
+  }
+}
