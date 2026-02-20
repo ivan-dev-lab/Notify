@@ -89,6 +89,7 @@ HOLD_TIMEFRAME_MINUTES = {
 
 USER_TIMEZONE = timezone(timedelta(hours=5))
 USER_TIMEZONE_LABEL = "GMT+5"
+MAX_ALERT_MESSAGE_LENGTH = 300
 
 HHMM_PATTERN = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 FULL_DATETIME_PATTERN = re.compile(
@@ -125,6 +126,7 @@ class AlertRule:
     price_time_mode: str | None = None
     timeframe_code: str | None = None
     condition_started_at_utc: str | None = None
+    message_text: str | None = None
 
 
 @dataclass
@@ -196,6 +198,9 @@ class AlertStore:
         except (KeyError, TypeError, ValueError):
             return None
 
+        raw_message = item.get("message_text", item.get("message"))
+        message_text = normalize_alert_message_value(raw_message)
+
         if user_id <= 0:
             return None
 
@@ -223,6 +228,7 @@ class AlertStore:
                 direction=direction,
                 target=target,
                 created_at_utc=created_at_utc,
+                message_text=message_text,
             )
 
         if kind == ALERT_KIND_TIME:
@@ -243,6 +249,7 @@ class AlertStore:
                 trigger_at_utc=trigger_at_utc,
                 delay_minutes=delay_minutes,
                 created_at_utc=created_at_utc,
+                message_text=message_text,
             )
 
         if kind == ALERT_KIND_PRICE_TIME:
@@ -288,6 +295,7 @@ class AlertStore:
                     timeframe_code=timeframe_code,
                     condition_started_at_utc=condition_started_at_utc,
                     created_at_utc=created_at_utc,
+                    message_text=message_text,
                 )
 
             if mode == PRICE_TIME_MODE_CANDLE_CLOSE:
@@ -304,6 +312,7 @@ class AlertStore:
                     price_time_mode=PRICE_TIME_MODE_CANDLE_CLOSE,
                     timeframe_code=timeframe_code,
                     created_at_utc=created_at_utc,
+                    message_text=message_text,
                 )
 
             return None
@@ -329,6 +338,7 @@ class AlertStore:
                 direction=direction,
                 target=target,
                 created_at_utc=created_at_utc,
+                message_text=message_text,
             )
 
         return None
@@ -353,7 +363,16 @@ class AlertStore:
             if alert.user_id == user_id and alert.asset == asset
         ]
 
-    def upsert_price(self, user_id: int, asset: str, direction: str, target: float) -> None:
+    def upsert_price(
+        self,
+        user_id: int,
+        asset: str,
+        direction: str,
+        target: float,
+        *,
+        message_text: str | None = None,
+    ) -> None:
+        normalized_message = normalize_alert_message_value(message_text)
         self.alerts = [
             alert
             for alert in self.alerts
@@ -374,6 +393,7 @@ class AlertStore:
                 direction=direction,
                 target=target,
                 created_at_utc=datetime.now(timezone.utc).isoformat(),
+                message_text=normalized_message,
             )
         )
 
@@ -387,8 +407,15 @@ class AlertStore:
         self.save()
 
     def add_time(
-        self, user_id: int, asset: str, trigger_at_utc: datetime, delay_minutes: int
+        self,
+        user_id: int,
+        asset: str,
+        trigger_at_utc: datetime,
+        delay_minutes: int,
+        *,
+        message_text: str | None = None,
     ) -> None:
+        normalized_message = normalize_alert_message_value(message_text)
         trigger_iso = trigger_at_utc.astimezone(timezone.utc).isoformat()
 
         self.alerts = [
@@ -410,6 +437,7 @@ class AlertStore:
                 trigger_at_utc=trigger_iso,
                 delay_minutes=max(1, int(delay_minutes)),
                 created_at_utc=datetime.now(timezone.utc).isoformat(),
+                message_text=normalized_message,
             )
         )
 
@@ -433,9 +461,11 @@ class AlertStore:
         *,
         delay_minutes: int | None = None,
         trigger_at_utc: datetime | None = None,
+        message_text: str | None = None,
     ) -> None:
         normalized_mode = mode.strip().lower()
         normalized_timeframe = timeframe_code.strip().lower()
+        normalized_message = normalize_alert_message_value(message_text)
 
         existing_filtered: list[AlertRule] = []
         for alert in self.alerts:
@@ -470,6 +500,7 @@ class AlertStore:
                 timeframe_code=normalized_timeframe,
                 condition_started_at_utc=None,
                 created_at_utc=datetime.now(timezone.utc).isoformat(),
+                message_text=normalized_message,
             )
         )
 
@@ -790,6 +821,49 @@ def parse_price(text: str) -> float | None:
         return None
 
 
+def normalize_alert_message_value(value: object | None) -> str | None:
+    if value is None:
+        return None
+
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def parse_user_alert_message_input(text: str) -> tuple[str | None, str | None]:
+    raw = (text or "").strip()
+    if raw in {"-", "—"}:
+        return None, None
+    if not raw:
+        return None, None
+    if len(raw) > MAX_ALERT_MESSAGE_LENGTH:
+        return None, (
+            "Сообщение слишком длинное. "
+            f"Максимум {MAX_ALERT_MESSAGE_LENGTH} символов."
+        )
+    return raw, None
+
+
+def format_alert_message_preview(message_text: str | None) -> str:
+    normalized = normalize_alert_message_value(message_text)
+    if not normalized:
+        return ""
+
+    compact = " ".join(normalized.split())
+    if len(compact) > 80:
+        compact = compact[:77].rstrip() + "..."
+
+    return f" | 💬 <i>{html.escape(compact)}</i>"
+
+
+def format_alert_message_block(message_text: str | None) -> str:
+    normalized = normalize_alert_message_value(message_text)
+    if not normalized:
+        return ""
+    return f"\n<b>Сообщение:</b> {html.escape(normalized)}"
+
+
 def format_target(target: float) -> str:
     return f"{target:.6f}".rstrip("0").rstrip(".")
 
@@ -818,17 +892,23 @@ def format_local_datetime(utc_iso: str | None) -> str:
 
 
 def render_alert_line(alert: AlertRule) -> str:
+    message_suffix = format_alert_message_preview(alert.message_text)
+
     if alert.kind == ALERT_KIND_PRICE:
         if alert.target is None or alert.direction is None:
             return f"• <code>{html.escape(alert.asset)}</code>: некорректный ценовой алерт"
         return (
             f"• <code>{html.escape(alert.asset)}</code>: "
             f"{direction_label(alert.direction)} <b>{format_target(alert.target)}</b>"
+            f"{message_suffix}"
         )
 
     if alert.kind == ALERT_KIND_TIME:
         when = format_local_datetime(alert.trigger_at_utc)
-        return f"• <code>{html.escape(alert.asset)}</code>: по времени <b>{html.escape(when)}</b>"
+        return (
+            f"• <code>{html.escape(alert.asset)}</code>: по времени "
+            f"<b>{html.escape(when)}</b>{message_suffix}"
+        )
 
     if alert.kind == ALERT_KIND_PRICE_TIME:
         if alert.target is None or alert.direction is None:
@@ -849,6 +929,7 @@ def render_alert_line(alert: AlertRule) -> str:
                 f"• <code>{html.escape(alert.asset)}</code>: "
                 f"удержание {html.escape(tf)} при {condition} "
                 f"(след. проверка: <b>{html.escape(next_check)}</b>)"
+                f"{message_suffix}"
             )
         if mode == PRICE_TIME_MODE_CANDLE_CLOSE:
             next_when = format_local_datetime(alert.trigger_at_utc)
@@ -856,8 +937,9 @@ def render_alert_line(alert: AlertRule) -> str:
                 f"• <code>{html.escape(alert.asset)}</code>: "
                 f"закрытие {html.escape(tf)} при {condition} "
                 f"(след. проверка: <b>{html.escape(next_when)}</b>)"
+                f"{message_suffix}"
             )
-        return f"• <code>{html.escape(alert.asset)}</code>: price+time {condition}"
+        return f"• <code>{html.escape(alert.asset)}</code>: price+time {condition}{message_suffix}"
 
     return f"• <code>{html.escape(alert.asset)}</code>: неизвестный алерт"
 
@@ -1628,11 +1710,15 @@ def build_edit_type_keyboard(asset: str) -> InlineKeyboardMarkup:
 
 
 def build_edit_keep_change_keyboard(asset: str, field: str, current_value: str) -> InlineKeyboardMarkup:
+    compact_value = " ".join(current_value.split())
+    if len(compact_value) > 32:
+        compact_value = compact_value[:29].rstrip() + "..."
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Оставить: {current_value}",
+                    text=f"Оставить: {compact_value}",
                     callback_data=f"{CALLBACK_EDIT_KEEP_PREFIX}{field}",
                 )
             ],
@@ -1709,18 +1795,9 @@ def get_display_assets(config: AppConfig, quotes: QuotesMap) -> list[str]:
     return assets
 
 
-def render_dashboard_text(config: AppConfig, quotes: QuotesMap, alerts: list[AlertRule]) -> str:
+def render_dashboard_text(config: AppConfig, quotes: QuotesMap) -> str:
     lines: list[str] = []
     lines.extend(render_grouped_quotes(config, quotes))
-    lines.append("")
-    lines.append("<b>Активные алерты</b>")
-
-    if not alerts:
-        lines.append("• нет")
-    else:
-        for alert in sorted(alerts, key=alert_sort_key):
-            lines.append(render_alert_line(alert))
-
     return "\n".join(lines)
 
 
@@ -1853,15 +1930,15 @@ def infer_quick_timeframe_from_alert(alert: AlertRule) -> str | None:
 
 def get_edit_type_required_fields(edit_type: str) -> list[str]:
     if edit_type == EDIT_TYPE_PRICE_CROSS:
-        return ["direction", "target"]
+        return ["direction", "target", "message"]
     if edit_type == EDIT_TYPE_PRICE_HOLD:
-        return ["direction", "target", "timeframe"]
+        return ["direction", "target", "timeframe", "message"]
     if edit_type == EDIT_TYPE_PRICE_CANDLE:
-        return ["direction", "target", "timeframe"]
+        return ["direction", "target", "timeframe", "message"]
     if edit_type == EDIT_TYPE_TIME_CANDLE:
-        return ["timeframe"]
+        return ["timeframe", "message"]
     if edit_type == EDIT_TYPE_TIME_CUSTOM:
-        return ["trigger_at_utc"]
+        return ["trigger_at_utc", "message"]
     return []
 
 
@@ -1911,6 +1988,9 @@ def get_original_edit_field_value(
             return original_alert.trigger_at_utc
         return None
 
+    if field == "message":
+        return normalize_alert_message_value(original_alert.message_text)
+
     return None
 
 
@@ -1921,6 +2001,7 @@ def snapshot_edit_session(session: dict[str, object]) -> dict[str, object]:
         "target": session.get("target"),
         "timeframe_code": session.get("timeframe_code"),
         "trigger_at_utc": session.get("trigger_at_utc"),
+        "message": session.get("message"),
         "step": session.get("step"),
         "field": session.get("field"),
     }
@@ -1964,6 +2045,8 @@ def get_next_unset_edit_field(session: dict[str, object]) -> str | None:
             return field
         if field == "trigger_at_utc" and not session.get("trigger_at_utc"):
             return field
+        if field == "message" and session.get("message") is None:
+            return field
     return None
 
 
@@ -1976,6 +2059,8 @@ def choose_edit_input_step(field: str) -> str:
         return "input_target"
     if field == "trigger_at_utc":
         return "input_time"
+    if field == "message":
+        return "input_message"
     return "choose_type"
 
 
@@ -2033,6 +2118,11 @@ def render_edit_session_text(session: dict[str, object]) -> str:
         elif field == "trigger_at_utc":
             field_text = "время"
             value_text = format_local_datetime(str(value or ""))
+        elif field == "message":
+            field_text = "сообщение"
+            value_text = " ".join(str(value).split())
+            if len(value_text) > 70:
+                value_text = value_text[:67].rstrip() + "..."
         else:
             field_text = field
             value_text = str(value or "-")
@@ -2067,6 +2157,14 @@ def render_edit_session_text(session: dict[str, object]) -> str:
         )
         return "\n".join(lines)
 
+    if step == "input_message":
+        lines.append("")
+        lines.append(
+            "Введите сообщение к алерту или <code>-</code>, "
+            "если сообщение не нужно."
+        )
+        return "\n".join(lines)
+
     if step == "review":
         lines.append("")
         lines.append(f"Новый тип: <b>{html.escape(edit_type_label(target_type))}</b>")
@@ -2081,6 +2179,14 @@ def render_edit_session_text(session: dict[str, object]) -> str:
                 "Время: "
                 f"<b>{html.escape(format_local_datetime(str(session.get('trigger_at_utc'))))}</b>"
             )
+        message_preview = normalize_alert_message_value(session.get("message"))
+        if message_preview:
+            compact = " ".join(message_preview.split())
+            if len(compact) > 120:
+                compact = compact[:117].rstrip() + "..."
+            lines.append(f"Сообщение: <i>{html.escape(compact)}</i>")
+        else:
+            lines.append("Сообщение: <i>без сообщения</i>")
         lines.append("")
         lines.append("Подтверждение не требуется, нажмите любую кнопку шага назад/отмены или отправьте значение, если нужно изменить.")
         return "\n".join(lines)
@@ -2124,7 +2230,7 @@ def build_edit_session_keyboard(session: dict[str, object]) -> InlineKeyboardMar
     if step == "choose_timeframe":
         return build_edit_timeframe_keyboard(asset, get_edit_timeframe_options(target_type))
 
-    if step in {"input_target", "input_time"}:
+    if step in {"input_target", "input_time", "input_message"}:
         return build_input_step_keyboard(asset, CALLBACK_EDIT_BACK)
 
     return build_edit_type_keyboard(asset)
@@ -2151,11 +2257,22 @@ def set_pending_for_edit_step(
             "back_callback": CALLBACK_EDIT_BACK,
         }
         return
+    if step == "input_message":
+        state.pending_inputs[user_id] = {
+            "type": "edit_message_input",
+            "asset": asset,
+            "back_callback": CALLBACK_EDIT_BACK,
+        }
+        return
 
     waiting = state.pending_inputs.get(user_id)
     if waiting is None:
         return
-    if str(waiting.get("type", "")) in {"edit_target_input", "edit_time_input"}:
+    if str(waiting.get("type", "")) in {
+        "edit_target_input",
+        "edit_time_input",
+        "edit_message_input",
+    }:
         state.pending_inputs.pop(user_id, None)
 
 
@@ -2175,6 +2292,7 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
     target_raw = session.get("target")
     timeframe_code = str(session.get("timeframe_code") or "")
     trigger_raw = str(session.get("trigger_at_utc") or "")
+    message_value = normalize_alert_message_value(session.get("message"))
 
     target_value = float(target_raw) if isinstance(target_raw, (int, float)) else None
 
@@ -2199,7 +2317,13 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
     old_asset, old_kind, old_created_at = parsed
 
     if edit_type == EDIT_TYPE_PRICE_CROSS:
-        state.alert_store.upsert_price(user_id, asset, direction, float(target_value))
+        state.alert_store.upsert_price(
+            user_id,
+            asset,
+            direction,
+            float(target_value),
+            message_text=message_value,
+        )
     elif edit_type == EDIT_TYPE_PRICE_HOLD:
         hold_minutes = HOLD_TIMEFRAME_MINUTES[timeframe_code]
         state.alert_store.add_price_time(
@@ -2210,6 +2334,7 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
             mode=PRICE_TIME_MODE_HOLD,
             timeframe_code=timeframe_code,
             delay_minutes=hold_minutes,
+            message_text=message_value,
         )
     elif edit_type == EDIT_TYPE_PRICE_CANDLE:
         trigger_at_utc, _, _ = compute_timeframe_trigger_utc(state, asset, timeframe_code)
@@ -2221,6 +2346,7 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
             mode=PRICE_TIME_MODE_CANDLE_CLOSE,
             timeframe_code=timeframe_code,
             trigger_at_utc=trigger_at_utc,
+            message_text=message_value,
         )
     elif edit_type == EDIT_TYPE_TIME_CANDLE:
         trigger_at_utc, delay, _ = compute_timeframe_trigger_utc(state, asset, timeframe_code)
@@ -2229,6 +2355,7 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
             asset=asset,
             trigger_at_utc=trigger_at_utc,
             delay_minutes=delay,
+            message_text=message_value,
         )
     elif edit_type == EDIT_TYPE_TIME_CUSTOM:
         trigger_at_utc = parse_utc_iso(trigger_raw)
@@ -2243,6 +2370,7 @@ def apply_edit_session(state: BotState, user_id: int) -> tuple[bool, str, str]:
             asset=asset,
             trigger_at_utc=trigger_at_utc,
             delay_minutes=delay,
+            message_text=message_value,
         )
     else:
         return False, "Неизвестный тип редактирования.", asset
@@ -2454,9 +2582,10 @@ async def refresh_quotes_and_alerts(
             )
 
         try:
+            text_with_message = text + format_alert_message_block(alert.message_text)
             await bot.send_message(
                 chat_id=alert.user_id,
-                text=text,
+                text=text_with_message,
                 reply_markup=build_extend_keyboard(alert),
             )
             logger.info(
@@ -2489,7 +2618,6 @@ async def send_dashboard_message(
     text = render_dashboard_text(
         state.config,
         quotes,
-        alerts,
     )
     sent = await message.answer(
         text=text,
@@ -2532,7 +2660,6 @@ async def edit_dashboard_message(
     text = render_dashboard_text(
         state.config,
         quotes,
-        alerts,
     )
     await safe_edit_message(
         query,
@@ -2900,6 +3027,7 @@ def build_router(state: BotState) -> Router:
             "target": None,
             "timeframe_code": None,
             "trigger_at_utc": None,
+            "message": None,
             "step": "choose_type",
             "field": "",
             "history": [],
@@ -2938,6 +3066,7 @@ def build_router(state: BotState) -> Router:
         session["target"] = None
         session["timeframe_code"] = None
         session["trigger_at_utc"] = None
+        session["message"] = None
         advance_edit_session_step(session)
         await query.answer()
         await continue_alert_edit_flow_query(query, state, user_id)
@@ -2982,6 +3111,8 @@ def build_router(state: BotState) -> Router:
             session["timeframe_code"] = str(original_value)
         elif field == "trigger_at_utc":
             session["trigger_at_utc"] = str(original_value)
+        elif field == "message":
+            session["message"] = str(original_value)
 
         advance_edit_session_step(session)
         await query.answer()
@@ -3475,17 +3606,31 @@ def build_router(state: BotState) -> Router:
             await edit_asset_alert_message(query, state, asset)
             return
 
-        state.alert_store.add_time(
-            user_id=user_id,
-            asset=asset,
-            trigger_at_utc=trigger_at_utc,
-            delay_minutes=delay,
+        state.pending_inputs[user_id] = {
+            "type": "alert_message_input",
+            "asset": asset,
+            "draft_kind": ALERT_KIND_TIME,
+            "trigger_at_utc": trigger_at_utc.isoformat(),
+            "delay_minutes": delay,
+            "back_callback": f"{CALLBACK_TIME_CANDLE_MENU_PREFIX}{asset}",
+        }
+
+        await safe_edit_message(
+            query,
+            text=(
+                f"<b>{html.escape(asset)}</b>\n"
+                f"Таймер по закрытию свечи <b>{html.escape(timeframe_label(timeframe_code))}</b> "
+                f"({html.escape(group)}).\n"
+                "Введите сообщение к алерту или <code>-</code>, если сообщение не нужно."
+            ),
+            reply_markup=build_input_step_keyboard(
+                asset,
+                f"{CALLBACK_TIME_CANDLE_MENU_PREFIX}{asset}",
+            ),
         )
 
-        await edit_asset_alert_message(query, state, asset)
-
         logger.info(
-            "Quick time alert created user_id=%s asset=%s timeframe=%s group=%s delay_minutes=%s trigger_at_utc=%s",
+            "Quick time alert condition saved user_id=%s asset=%s timeframe=%s group=%s delay_minutes=%s trigger_at_utc=%s",
             user_id,
             asset,
             timeframe_code,
@@ -3600,6 +3745,30 @@ def build_router(state: BotState) -> Router:
             await continue_alert_edit_flow_message(message, state, user_id)
             return
 
+        if input_type == "edit_message_input":
+            session = state.alert_edit_sessions.get(user_id)
+            if session is None:
+                state.pending_inputs.pop(user_id, None)
+                await message.answer("Сессия редактирования завершена.")
+                await send_alerts_menu_message(message, state)
+                return
+
+            parsed_message, error_text = parse_user_alert_message_input(message.text or "")
+            if error_text:
+                back_callback = str(waiting.get("back_callback") or CALLBACK_EDIT_BACK)
+                await message.answer(
+                    error_text,
+                    reply_markup=build_input_step_keyboard(asset_text, back_callback),
+                )
+                return
+
+            push_edit_session_history(session)
+            session["message"] = parsed_message or ""
+            advance_edit_session_step(session)
+            state.pending_inputs.pop(user_id, None)
+            await continue_alert_edit_flow_message(message, state, user_id)
+            return
+
         if input_type == ALERT_KIND_PRICE:
             target = parse_price(message.text or "")
             direction = waiting.get("direction", "")
@@ -3618,28 +3787,33 @@ def build_router(state: BotState) -> Router:
                 )
                 return
 
-            state.alert_store.upsert_price(
-                user_id=user_id,
-                asset=asset_text,
-                direction=str(direction),
-                target=target,
-            )
-            state.pending_inputs.pop(user_id, None)
-
             logger.info(
-                "Price alert saved from text user_id=%s asset=%s direction=%s target=%s",
+                "Price alert condition saved user_id=%s asset=%s direction=%s target=%s",
                 user_id,
                 asset_text,
                 direction,
                 target,
             )
 
+            state.pending_inputs[user_id] = {
+                "type": "alert_message_input",
+                "asset": asset_text,
+                "draft_kind": ALERT_KIND_PRICE,
+                "direction": str(direction),
+                "target": target,
+                "back_callback": f"{CALLBACK_PRICE_SET_PREFIX}{asset_text}|{direction}",
+            }
+
             await message.answer(
-                "<b>Ценовой алерт сохранен</b>\n"
+                "<b>Почти готово</b>\n"
                 f"<code>{html.escape(asset_text)}</code>: "
-                f"{direction_label(str(direction))} <b>{format_target(target)}</b>"
+                f"{direction_label(str(direction))} <b>{format_target(target)}</b>\n"
+                "Введите сообщение к алерту или <code>-</code>, если сообщение не нужно.",
+                reply_markup=build_input_step_keyboard(
+                    asset_text,
+                    f"{CALLBACK_PRICE_SET_PREFIX}{asset_text}|{direction}",
+                ),
             )
-            await send_asset_alert_message(message, state, asset_text)
             return
 
         if input_type == ALERT_KIND_PRICE_TIME:
@@ -3694,41 +3868,39 @@ def build_router(state: BotState) -> Router:
                 await send_asset_alert_message(message, state, asset_text)
                 return
 
-            trigger_at_utc, _, group = compute_timeframe_trigger_utc(
-                state,
-                asset_text,
-                timeframe_code,
-            )
-            state.alert_store.add_price_time(
-                user_id=user_id,
-                asset=asset_text,
-                direction=str(direction),
-                target=target,
-                mode=PRICE_TIME_MODE_CANDLE_CLOSE,
-                timeframe_code=timeframe_code,
-                trigger_at_utc=trigger_at_utc,
-            )
-            state.pending_inputs.pop(user_id, None)
-
             logger.info(
-                "Price-time close alert saved user_id=%s asset=%s direction=%s target=%s timeframe=%s group=%s trigger_at_utc=%s",
+                "Price-time alert condition saved user_id=%s asset=%s direction=%s target=%s timeframe=%s",
                 user_id,
                 asset_text,
                 direction,
                 target,
                 timeframe_code,
-                group,
-                trigger_at_utc.isoformat(),
             )
 
+            state.pending_inputs[user_id] = {
+                "type": "alert_message_input",
+                "asset": asset_text,
+                "draft_kind": ALERT_KIND_PRICE_TIME,
+                "direction": str(direction),
+                "target": target,
+                "pt_mode": str(mode),
+                "timeframe_code": timeframe_code,
+                "back_callback": (
+                    f"{CALLBACK_PRICE_TIME_TF_PREFIX}{asset_text}|{direction}|{timeframe_code}"
+                ),
+            }
+
             await message.answer(
-                "<b>Price+Time алерт сохранен</b>\n"
+                "<b>Почти готово</b>\n"
                 f"<code>{html.escape(asset_text)}</code>: закрытие "
                 f"<b>{html.escape(timeframe_label(timeframe_code))}</b>, "
                 f"условие {direction_label(str(direction))} <b>{format_target(target)}</b>\n"
-                f"Следующая проверка: <b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>"
+                "Введите сообщение к алерту или <code>-</code>, если сообщение не нужно.",
+                reply_markup=build_input_step_keyboard(
+                    asset_text,
+                    f"{CALLBACK_PRICE_TIME_TF_PREFIX}{asset_text}|{direction}|{timeframe_code}",
+                ),
             )
-            await send_asset_alert_message(message, state, asset_text)
             return
 
         if input_type == ALERT_KIND_TIME and waiting.get("mode") == "custom":
@@ -3749,27 +3921,162 @@ def build_router(state: BotState) -> Router:
                 return
 
             trigger_at_utc, delay_minutes = parsed
-            state.alert_store.add_time(
-                user_id=user_id,
-                asset=asset_text,
-                trigger_at_utc=trigger_at_utc,
-                delay_minutes=delay_minutes,
-            )
-            state.pending_inputs.pop(user_id, None)
 
             logger.info(
-                "Custom time alert saved user_id=%s asset=%s trigger_at_utc=%s delay_minutes=%s",
+                "Custom time alert condition saved user_id=%s asset=%s trigger_at_utc=%s delay_minutes=%s",
                 user_id,
                 asset_text,
                 trigger_at_utc.isoformat(),
                 delay_minutes,
             )
 
+            state.pending_inputs[user_id] = {
+                "type": "alert_message_input",
+                "asset": asset_text,
+                "draft_kind": ALERT_KIND_TIME,
+                "trigger_at_utc": trigger_at_utc.isoformat(),
+                "delay_minutes": delay_minutes,
+                "back_callback": f"{CALLBACK_TIME_CUSTOM_PREFIX}{asset_text}",
+            }
+
             await message.answer(
-                "<b>Алерт по времени сохранен</b>\n"
+                "<b>Почти готово</b>\n"
                 f"<code>{html.escape(asset_text)}</code>: "
-                f"<b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>"
+                f"<b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>\n"
+                "Введите сообщение к алерту или <code>-</code>, если сообщение не нужно.",
+                reply_markup=build_input_step_keyboard(
+                    asset_text,
+                    f"{CALLBACK_TIME_CUSTOM_PREFIX}{asset_text}",
+                ),
             )
+            return
+
+        if input_type == "alert_message_input":
+            message_text, error_text = parse_user_alert_message_input(message.text or "")
+            if error_text:
+                back_callback = str(waiting.get("back_callback") or f"{CALLBACK_BACK_ASSET_PREFIX}{asset_text}")
+                await message.answer(
+                    error_text,
+                    reply_markup=build_input_step_keyboard(asset_text, back_callback),
+                )
+                return
+
+            draft_kind = str(waiting.get("draft_kind") or "")
+
+            if draft_kind == ALERT_KIND_PRICE:
+                direction = str(waiting.get("direction") or "")
+                target_raw = waiting.get("target")
+                target = (
+                    float(target_raw)
+                    if isinstance(target_raw, (int, float))
+                    else parse_price(str(target_raw or ""))
+                )
+                if direction not in {CROSS_TOP_DOWN, CROSS_BOTTOM_UP} or target is None:
+                    state.pending_inputs.pop(user_id, None)
+                    await message.answer("Ошибка настройки алерта. Повторите через меню.")
+                    await send_asset_alert_message(message, state, asset_text)
+                    return
+
+                state.alert_store.upsert_price(
+                    user_id=user_id,
+                    asset=asset_text,
+                    direction=direction,
+                    target=target,
+                    message_text=message_text,
+                )
+                state.pending_inputs.pop(user_id, None)
+                await message.answer(
+                    "<b>Ценовой алерт сохранен</b>\n"
+                    f"<code>{html.escape(asset_text)}</code>: "
+                    f"{direction_label(direction)} <b>{format_target(target)}</b>"
+                    f"{format_alert_message_block(message_text)}"
+                )
+                await send_asset_alert_message(message, state, asset_text)
+                return
+
+            if draft_kind == ALERT_KIND_PRICE_TIME:
+                direction = str(waiting.get("direction") or "")
+                mode = str(waiting.get("pt_mode") or "")
+                timeframe_code = str(waiting.get("timeframe_code") or "").lower()
+                target_raw = waiting.get("target")
+                target = (
+                    float(target_raw)
+                    if isinstance(target_raw, (int, float))
+                    else parse_price(str(target_raw or ""))
+                )
+
+                if (
+                    direction not in {CROSS_TOP_DOWN, CROSS_BOTTOM_UP}
+                    or target is None
+                    or mode != PRICE_TIME_MODE_CANDLE_CLOSE
+                    or not is_supported_candle_timeframe(timeframe_code)
+                ):
+                    state.pending_inputs.pop(user_id, None)
+                    await message.answer("Ошибка настройки алерта. Повторите через меню.")
+                    await send_asset_alert_message(message, state, asset_text)
+                    return
+
+                trigger_at_utc, _, _ = compute_timeframe_trigger_utc(
+                    state,
+                    asset_text,
+                    timeframe_code,
+                )
+                state.alert_store.add_price_time(
+                    user_id=user_id,
+                    asset=asset_text,
+                    direction=direction,
+                    target=target,
+                    mode=PRICE_TIME_MODE_CANDLE_CLOSE,
+                    timeframe_code=timeframe_code,
+                    trigger_at_utc=trigger_at_utc,
+                    message_text=message_text,
+                )
+                state.pending_inputs.pop(user_id, None)
+                await message.answer(
+                    "<b>Price+Time алерт сохранен</b>\n"
+                    f"<code>{html.escape(asset_text)}</code>: закрытие "
+                    f"<b>{html.escape(timeframe_label(timeframe_code))}</b>, "
+                    f"условие {direction_label(direction)} <b>{format_target(target)}</b>\n"
+                    f"Следующая проверка: "
+                    f"<b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>"
+                    f"{format_alert_message_block(message_text)}"
+                )
+                await send_asset_alert_message(message, state, asset_text)
+                return
+
+            if draft_kind == ALERT_KIND_TIME:
+                trigger_raw = str(waiting.get("trigger_at_utc") or "")
+                trigger_at_utc = parse_utc_iso(trigger_raw)
+                delay_raw = waiting.get("delay_minutes")
+                delay_minutes = 0
+                if isinstance(delay_raw, (int, float, str)):
+                    with contextlib.suppress(ValueError, TypeError):
+                        delay_minutes = int(delay_raw)
+                if trigger_at_utc is None or delay_minutes <= 0:
+                    state.pending_inputs.pop(user_id, None)
+                    await message.answer("Ошибка настройки алерта. Повторите через меню.")
+                    await send_asset_alert_message(message, state, asset_text)
+                    return
+
+                state.alert_store.add_time(
+                    user_id=user_id,
+                    asset=asset_text,
+                    trigger_at_utc=trigger_at_utc,
+                    delay_minutes=delay_minutes,
+                    message_text=message_text,
+                )
+                state.pending_inputs.pop(user_id, None)
+                await message.answer(
+                    "<b>Алерт по времени сохранен</b>\n"
+                    f"<code>{html.escape(asset_text)}</code>: "
+                    f"<b>{html.escape(format_local_datetime(trigger_at_utc.isoformat()))}</b>"
+                    f"{format_alert_message_block(message_text)}"
+                )
+                await send_asset_alert_message(message, state, asset_text)
+                return
+
+            state.pending_inputs.pop(user_id, None)
+            await message.answer("Ошибка настройки алерта. Повторите через меню.")
             await send_asset_alert_message(message, state, asset_text)
             return
 
