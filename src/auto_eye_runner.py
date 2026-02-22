@@ -7,10 +7,23 @@ from pathlib import Path
 
 from app_logging import configure_logging
 from auto_eye.detectors.registry import build_detectors
-from auto_eye.engine import AutoEyeEngine
+from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
 from config_loader import load_config
 
 logger = logging.getLogger(__name__)
+
+
+def summarize_reports(reports: list[TimeframeUpdateReport]) -> dict[str, object]:
+    return {
+        "timeframes_processed": len(reports),
+        "files_updated": sum(1 for report in reports if report.file_updated),
+        "timeframes_skipped_no_data": sum(
+            1 for report in reports if report.skipped_no_data
+        ),
+        "new_fvg": sum(report.new_count for report in reports),
+        "status_updates": sum(report.status_updated_count for report in reports),
+        "active_total": sum(report.total_active for report in reports),
+    }
 
 
 def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, object]:
@@ -25,13 +38,28 @@ def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, o
     logger.info("Starting auto-eye run with config: %s", config_path)
 
     detectors = build_detectors(config.auto_eye.elements)
-    engine = AutoEyeEngine(config=config, detectors=detectors)
-    payload = engine.run_once(force_full_scan=force_full_scan)
+    service = TimeframeUpdateService(config=config, detectors=detectors)
+
+    reports = service.run_all(force=True)
+    for report in reports:
+        logger.info(
+            "TF=%s file_updated=%s new=%s status_updated=%s active=%s total=%s msg=%s",
+            report.timeframe,
+            report.file_updated,
+            report.new_count,
+            report.status_updated_count,
+            report.total_active,
+            report.total_elements,
+            report.message,
+        )
+    payload = summarize_reports(reports)
 
     logger.info(
-        "Auto-eye run completed: elements=%s errors=%s",
-        payload.get("count"),
-        len(payload.get("errors", [])),
+        "Auto-eye run completed: processed=%s updated_files=%s new=%s status_updates=%s",
+        payload["timeframes_processed"],
+        payload["files_updated"],
+        payload["new_fvg"],
+        payload["status_updates"],
     )
     return payload
 
@@ -48,24 +76,51 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
     logger.info("Starting auto-eye loop with config: %s", config_path)
 
     detectors = build_detectors(config.auto_eye.elements)
-    engine = AutoEyeEngine(config=config, detectors=detectors)
+    service = TimeframeUpdateService(config=config, detectors=detectors)
 
-    interval = max(10, config.auto_eye.update_interval_seconds)
-    first_run = True
+    poll_seconds = max(10, config.auto_eye.scheduler_poll_seconds)
+    logger.info(
+        "Auto-eye scheduler started: poll=%s sec, timeframes=%s",
+        poll_seconds,
+        ", ".join(config.auto_eye.timeframes),
+    )
+
+    if force_full_scan:
+        try:
+            initial_reports = service.run_all(force=True)
+            summary = summarize_reports(initial_reports)
+            logger.info(
+                "Initial full scan done: processed=%s updated_files=%s new=%s status_updates=%s",
+                summary["timeframes_processed"],
+                summary["files_updated"],
+                summary["new_fvg"],
+                summary["status_updates"],
+            )
+        except Exception:
+            logger.exception("Initial full scan failed")
+
     while True:
         try:
-            engine.run_once(force_full_scan=force_full_scan and first_run)
+            reports = service.run_due()
+            if reports:
+                summary = summarize_reports(reports)
+                logger.info(
+                    "Scheduler cycle: processed=%s updated_files=%s new=%s status_updates=%s",
+                    summary["timeframes_processed"],
+                    summary["files_updated"],
+                    summary["new_fvg"],
+                    summary["status_updates"],
+                )
         except Exception:
             logger.exception("Auto-eye loop iteration failed")
-        first_run = False
-        time.sleep(interval)
+        time.sleep(poll_seconds)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "AutoEye market-structure scanner. "
-            "Independent from bot, but exports machine-readable JSON/CSV."
+            "Independent from bot, but exports machine-readable JSON."
         )
     )
     parser.add_argument(
@@ -77,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Run continuously using auto_eye.update_interval_seconds",
+        help="Run continuously using per-timeframe schedule",
     )
     parser.add_argument(
         "--full-scan",

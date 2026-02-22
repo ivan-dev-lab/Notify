@@ -57,6 +57,7 @@ class AutoEyeConfig:
     history_buffer_days: int
     incremental_bars: int
     update_interval_seconds: int
+    scheduler_poll_seconds: int
     output_json: str
     output_csv: str
     state_json: str
@@ -225,6 +226,9 @@ def load_config(config_path: Path) -> AppConfig:
             incremental_bars=max(20, int(auto_eye_raw.get("incremental_bars", 500))),
             update_interval_seconds=max(
                 10, int(auto_eye_raw.get("update_interval_seconds", 300))
+            ),
+            scheduler_poll_seconds=max(
+                10, int(auto_eye_raw.get("scheduler_poll_seconds", 60))
             ),
             output_json=str(auto_eye_raw.get("output_json", "output/auto_eye_zones.json")),
             output_csv=str(auto_eye_raw.get("output_csv", "output/auto_eye_zones.csv")),

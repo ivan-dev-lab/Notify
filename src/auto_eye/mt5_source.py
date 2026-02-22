@@ -64,7 +64,7 @@ class MT5BarsSource:
         timeframe_code: str,
         history_days: int,
         history_buffer_days: int,
-    ) -> list[OHLCBar]:
+    ) -> list[OHLCBar] | None:
         self._ensure_connected()
         assert mt5 is not None
 
@@ -75,6 +75,16 @@ class MT5BarsSource:
 
         self._ensure_symbol_selected(symbol)
         raw_rates = mt5.copy_rates_range(symbol, timeframe_value, start_utc, now_utc)
+        if raw_rates is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "copy_rates_range returned None for %s %s: %s %s",
+                symbol,
+                timeframe_code,
+                error_code,
+                error_message,
+            )
+            return None
         return self._parse_rates(raw_rates)
 
     def fetch_incremental(
@@ -86,7 +96,7 @@ class MT5BarsSource:
         incremental_bars: int,
         history_days: int,
         history_buffer_days: int,
-    ) -> list[OHLCBar]:
+    ) -> list[OHLCBar] | None:
         self._ensure_connected()
         assert mt5 is not None
 
@@ -104,12 +114,33 @@ class MT5BarsSource:
             from_utc = history_limit
 
         raw_rates = mt5.copy_rates_range(symbol, timeframe_value, from_utc, now_utc)
+        if raw_rates is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "incremental copy_rates_range returned None for %s %s: %s %s",
+                symbol,
+                timeframe_code,
+                error_code,
+                error_message,
+            )
+            return None
+
         bars = self._parse_rates(raw_rates)
         if len(bars) >= 3:
             return bars
 
         fallback_count = max(20, incremental_bars)
         fallback_rates = mt5.copy_rates_from_pos(symbol, timeframe_value, 0, fallback_count)
+        if fallback_rates is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "copy_rates_from_pos returned None for %s %s: %s %s",
+                symbol,
+                timeframe_code,
+                error_code,
+                error_message,
+            )
+            return None
         return self._parse_rates(fallback_rates)
 
     def _ensure_connected(self) -> None:
@@ -127,8 +158,6 @@ class MT5BarsSource:
 
     @staticmethod
     def _parse_rates(raw_rates: object) -> list[OHLCBar]:
-        if raw_rates is None:
-            return []
 
         bars: list[OHLCBar] = []
         for row in raw_rates:

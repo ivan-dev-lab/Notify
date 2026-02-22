@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
 from config_loader import AutoEyeConfig
 
 from auto_eye.detectors.fvg import BEARISH, BULLISH, FVGDetector
-from auto_eye.models import OHLCBar, STATUS_MITIGATED_FULL
+from auto_eye.models import OHLCBar, STATUS_MITIGATED_FULL, STATUS_MITIGATED_PARTIAL
 
 
 def build_config() -> AutoEyeConfig:
@@ -26,6 +26,7 @@ def build_config() -> AutoEyeConfig:
         history_buffer_days=5,
         incremental_bars=500,
         update_interval_seconds=300,
+        scheduler_poll_seconds=60,
         output_json="output/auto_eye_zones.json",
         output_csv="output/auto_eye_zones.csv",
         state_json="output/auto_eye_state.json",
@@ -152,6 +153,32 @@ class FVGDetectorTests(unittest.TestCase):
         )
         self.assertEqual(updated.status, STATUS_MITIGATED_FULL)
         self.assertIsNotNone(updated.mitigated_time)
+
+    def test_status_switches_to_mitigated_partial(self) -> None:
+        bars = [
+            make_bar(0, open_price=9.4, high_price=10.0, low_price=9.0, close_price=9.8),
+            make_bar(1, open_price=9.8, high_price=10.4, low_price=9.6, close_price=10.2),
+            make_bar(2, open_price=11.1, high_price=11.4, low_price=11.0, close_price=11.3),
+            # Touches and partially fills, but not fully.
+            make_bar(3, open_price=10.9, high_price=11.1, low_price=10.6, close_price=10.8),
+        ]
+        detected = self.detector.detect(
+            symbol="EURUSD",
+            timeframe="M5",
+            bars=bars[:3],
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(detected), 1)
+        element = detected[0]
+
+        updated = self.detector.update_status(
+            element=element,
+            bars=bars,
+            config=self.config,
+        )
+        self.assertEqual(updated.status, STATUS_MITIGATED_PARTIAL)
+        self.assertIsNotNone(updated.touched_time)
 
 
 if __name__ == "__main__":

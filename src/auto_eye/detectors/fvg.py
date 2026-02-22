@@ -9,6 +9,7 @@ from config_loader import AutoEyeConfig
 from auto_eye.models import (
     OHLCBar,
     STATUS_ACTIVE,
+    STATUS_MITIGATED_PARTIAL,
     STATUS_MITIGATED_FULL,
     STATUS_TOUCHED,
     TrackedElement,
@@ -158,7 +159,9 @@ class FVGDetector(MarketElementDetector):
             element.fill_percent = None
 
         if element.status != STATUS_MITIGATED_FULL:
-            if element.touched_time is not None:
+            if max_depth > 0:
+                element.status = STATUS_MITIGATED_PARTIAL
+            elif element.touched_time is not None:
                 element.status = STATUS_TOUCHED
             else:
                 element.status = STATUS_ACTIVE

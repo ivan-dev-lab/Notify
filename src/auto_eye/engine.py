@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.exporters import export_csv, export_json, resolve_output_path
-from auto_eye.models import AutoEyeState, TrackedElement
+from auto_eye.exporters import asset_json_path, export_json, resolve_output_path
+from auto_eye.models import AutoEyeState, TrackedElement, datetime_to_iso
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.state_store import AutoEyeStateStore, resolve_path
 from auto_eye.timeframes import normalize_timeframes
@@ -95,6 +95,11 @@ class AutoEyeEngine:
                                 incremental_bars=auto_eye_cfg.incremental_bars,
                                 history_days=auto_eye_cfg.history_days,
                                 history_buffer_days=auto_eye_cfg.history_buffer_days,
+                            )
+
+                        if bars is None:
+                            raise RuntimeError(
+                                f"No bars returned from MT5 for {symbol} {timeframe}"
                             )
 
                         if len(bars) < 3:
@@ -235,10 +240,79 @@ class AutoEyeEngine:
         elements: list[TrackedElement],
     ) -> None:
         auto_eye_cfg = self.config.auto_eye
-        json_path = resolve_output_path(auto_eye_cfg.output_json)
-        csv_path = resolve_output_path(auto_eye_cfg.output_csv)
-        export_json(json_path, payload)
-        export_csv(csv_path, elements)
+        base_json_path = resolve_output_path(auto_eye_cfg.output_json)
+        elements_by_symbol: dict[str, list[TrackedElement]] = {}
+        for element in elements:
+            elements_by_symbol.setdefault(element.symbol, []).append(element)
+
+        raw_symbols = payload.get("symbols")
+        symbols: list[str] = []
+        if isinstance(raw_symbols, list):
+            for item in raw_symbols:
+                normalized = str(item).strip()
+                if normalized and normalized not in symbols:
+                    symbols.append(normalized)
+        for symbol in elements_by_symbol.keys():
+            if symbol not in symbols:
+                symbols.append(symbol)
+
+        raw_timeframes = payload.get("timeframes")
+        timeframes: list[str] = []
+        if isinstance(raw_timeframes, list):
+            for item in raw_timeframes:
+                normalized = str(item).strip().upper()
+                if normalized and normalized not in timeframes:
+                    timeframes.append(normalized)
+
+        for symbol in symbols:
+            symbol_elements = sorted(
+                elements_by_symbol.get(symbol, []),
+                key=lambda item: (item.timeframe, item.c3_time, item.id),
+            )
+            elements_by_timeframe: dict[str, list[TrackedElement]] = {}
+            for item in symbol_elements:
+                key = item.timeframe.upper()
+                elements_by_timeframe.setdefault(key, []).append(item)
+                if key not in timeframes:
+                    timeframes.append(key)
+
+            raw_errors = payload.get("errors", [])
+            symbol_errors: list[str] = []
+            if isinstance(raw_errors, list):
+                symbol_errors = [
+                    error
+                    for error in raw_errors
+                    if isinstance(error, str) and error.startswith(f"{symbol} ")
+                ]
+
+            timeframe_payload: dict[str, object] = {}
+            for timeframe in timeframes:
+                timeframe_elements = sorted(
+                    elements_by_timeframe.get(timeframe, []),
+                    key=lambda item: (item.c3_time, item.id),
+                )
+                last_bar_time = None
+                if timeframe_elements:
+                    last_bar_time = max(
+                        item.c3_time for item in timeframe_elements
+                    )
+                timeframe_payload[timeframe] = {
+                    "initialized": bool(timeframe_elements),
+                    "updated_at_utc": payload.get("generated_at_utc"),
+                    "last_bar_time": datetime_to_iso(last_bar_time),
+                    "elements": [item.to_dict() for item in timeframe_elements],
+                }
+
+            symbol_payload = {
+                "updated_at_utc": payload.get("generated_at_utc"),
+                "source": payload.get("source"),
+                "symbol": symbol,
+                "enabled_elements": payload.get("enabled_elements"),
+                "count": len(symbol_elements),
+                "errors": symbol_errors,
+                "timeframes": timeframe_payload,
+            }
+            export_json(asset_json_path(base_json_path, symbol), symbol_payload)
 
     def _resolve_symbols(self) -> list[str]:
         symbols: list[str] = []

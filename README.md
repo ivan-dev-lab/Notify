@@ -48,14 +48,14 @@ logging:
 auto_eye:
   enabled: true
   symbols: []              # empty -> scraper.assets
-  timeframes: ["M5"]
+  timeframes: ["M15", "H1", "H4", "D1", "W1", "MN1"]
   elements: ["fvg"]
   history_days: 30
   history_buffer_days: 5
   incremental_bars: 500
-  update_interval_seconds: 300
+  scheduler_poll_seconds: 60
+  update_interval_seconds: 300  # legacy, можно оставить
   output_json: "output/auto_eye_zones.json"
-  output_csv: "output/auto_eye_zones.csv"
   state_json: "output/auto_eye_state.json"
   min_gap_points: 0
   require_displacement: false
@@ -107,11 +107,20 @@ python src/bot.py
 python src/auto_eye_runner.py --config config/site_config.yaml
 ```
 
-Непрерывный режим с интервалом из `auto_eye.update_interval_seconds`:
+Непрерывный режим с расписанием по TF (M15/H1/H4/D1/W1/MN1):
 
 ```bash
 python src/auto_eye_runner.py --config config/site_config.yaml --loop
 ```
+
+Расписание обновлений:
+
+- `M15` — каждые 15 минут
+- `H1` — каждый час
+- `H4` — каждые 4 часа
+- `D1` — раз в день
+- `W1` — раз в неделю
+- `MN1` (`M1`) — раз в месяц
 
 Принудительный полный пересчёт истории (например после изменения правил):
 
@@ -121,9 +130,9 @@ python src/auto_eye_runner.py --config config/site_config.yaml --full-scan
 
 Результаты:
 
-- `auto_eye.output_json` — полный JSON-снимок найденных зон
-- `auto_eye.output_csv` — CSV-экспорт для анализа
-- `auto_eye.state_json` — внутреннее состояние для инкрементального обновления
+- создаются отдельные JSON-файлы по активам (например: `GBPUSD.json`, `EURUSD.json`, ...)
+- в каждом файле актива хранятся данные по таймфреймам (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`)
+- файл актива перезаписывается только при изменениях соответствующего таймфрейма (новые FVG или смена статуса)
 
 ## Сборка EXE (PyInstaller / auto-py-to-exe)
 

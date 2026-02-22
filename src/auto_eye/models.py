@@ -6,6 +6,7 @@ from typing import Any
 
 STATUS_ACTIVE = "active"
 STATUS_TOUCHED = "touched"
+STATUS_MITIGATED_PARTIAL = "mitigated_partial"
 STATUS_MITIGATED_FULL = "mitigated_full"
 
 
