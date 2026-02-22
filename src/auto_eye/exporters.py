@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,26 @@ def sanitize_asset_filename(asset: str) -> str:
     return normalized
 
 
-def asset_json_path(base_json_path: Path, asset: str) -> Path:
-    return base_json_path.parent / f"{sanitize_asset_filename(asset)}.json"
+def sanitize_element_folder(element_name: str) -> str:
+    normalized = str(element_name).strip().upper()
+    if not normalized:
+        return "FVG"
+    normalized = re.sub(r'[\\/:*?"<>|]+', "_", normalized)
+    normalized = re.sub(r"\s+", "_", normalized)
+    return normalized
+
+
+def resolve_storage_element_name(element_names: Iterable[str]) -> str:
+    for item in element_names:
+        text = str(item).strip()
+        if text:
+            return sanitize_element_folder(text)
+    return "FVG"
+
+
+def asset_json_path(base_json_path: Path, asset: str, *, element_name: str = "FVG") -> Path:
+    folder = sanitize_element_folder(element_name)
+    return base_json_path.parent / folder / f"{sanitize_asset_filename(asset)}.json"
 
 
 def export_json(path: Path, payload: dict[str, object]) -> None:

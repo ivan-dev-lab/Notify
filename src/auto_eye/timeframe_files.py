@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from auto_eye.exporters import asset_json_path
+from auto_eye.exporters import asset_json_path, resolve_storage_element_name
 from auto_eye.models import TrackedElement, datetime_from_iso, datetime_to_iso
 
 logger = logging.getLogger(__name__)
@@ -44,11 +44,21 @@ class TimeframeSnapshot:
 
 
 class TimeframeFileStore:
-    def __init__(self, base_json_path: Path) -> None:
+    def __init__(
+        self,
+        base_json_path: Path,
+        *,
+        element_name: str = "FVG",
+    ) -> None:
         self.base_json_path = base_json_path
+        self.element_name = resolve_storage_element_name([element_name])
 
     def json_path_for_symbol(self, symbol: str) -> Path:
-        return asset_json_path(self.base_json_path, symbol)
+        return asset_json_path(
+            self.base_json_path,
+            symbol,
+            element_name=self.element_name,
+        )
 
     def load(self, timeframe: str, symbols: list[str]) -> TimeframeSnapshot:
         normalized_timeframe = timeframe.strip().upper()

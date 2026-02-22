@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.exporters import asset_json_path, export_json, resolve_output_path
+from auto_eye.exporters import (
+    asset_json_path,
+    export_json,
+    resolve_output_path,
+    resolve_storage_element_name,
+)
 from auto_eye.models import AutoEyeState, TrackedElement, datetime_to_iso
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.state_store import AutoEyeStateStore, resolve_path
@@ -241,6 +246,7 @@ class AutoEyeEngine:
     ) -> None:
         auto_eye_cfg = self.config.auto_eye
         base_json_path = resolve_output_path(auto_eye_cfg.output_json)
+        storage_element = resolve_storage_element_name(self.detectors.keys())
         elements_by_symbol: dict[str, list[TrackedElement]] = {}
         for element in elements:
             elements_by_symbol.setdefault(element.symbol, []).append(element)
@@ -312,7 +318,14 @@ class AutoEyeEngine:
                 "errors": symbol_errors,
                 "timeframes": timeframe_payload,
             }
-            export_json(asset_json_path(base_json_path, symbol), symbol_payload)
+            export_json(
+                asset_json_path(
+                    base_json_path,
+                    symbol,
+                    element_name=storage_element,
+                ),
+                symbol_payload,
+            )
 
     def _resolve_symbols(self) -> list[str]:
         symbols: list[str] = []

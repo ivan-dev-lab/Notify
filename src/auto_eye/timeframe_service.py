@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.exporters import resolve_output_path
+from auto_eye.exporters import resolve_output_path, resolve_storage_element_name
 from auto_eye.models import STATUS_ACTIVE, TrackedElement
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.scheduler import TimeframeScheduler
@@ -44,8 +44,10 @@ class TimeframeUpdateService:
         self.detectors = detectors
         self.source = source or MT5BarsSource(config)
         self.scheduler = scheduler or TimeframeScheduler()
+        storage_element = resolve_storage_element_name(detectors.keys())
         self.file_store = file_store or TimeframeFileStore(
             resolve_output_path(config.auto_eye.output_json),
+            element_name=storage_element,
         )
         self.last_check_by_timeframe: dict[str, datetime] = {}
         self.last_bar_by_key: dict[str, datetime] = {}

@@ -61,8 +61,9 @@ class TimeframeFileStoreTests(unittest.TestCase):
 
             self.assertEqual({path.name for path in saved_paths}, {"EURUSD.json", "GBPUSD.json"})
             self.assertEqual(list(Path(tmp_dir).glob("*.csv")), [])
+            self.assertEqual(len(list((Path(tmp_dir) / "FVG").glob("*.json"))), 2)
 
-            eur_path = Path(tmp_dir) / "EURUSD.json"
+            eur_path = Path(tmp_dir) / "FVG" / "EURUSD.json"
             with eur_path.open("r", encoding="utf-8") as file:
                 eur_payload = json.load(file)
             self.assertEqual(eur_payload.get("symbol"), "EURUSD")
