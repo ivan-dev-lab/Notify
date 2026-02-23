@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -246,7 +246,7 @@ class AutoEyeEngine:
         _ = payload
         _ = elements
         logger.debug(
-            "Legacy per-element export is disabled. Use output/State/<SYMBOL>.json as source of truth."
+            "Legacy per-element export is disabled. Use ../Exchange/State/<SYMBOL>.json as source of truth."
         )
 
     def _resolve_symbols(self) -> list[str]:
@@ -299,3 +299,4 @@ class AutoEyeEngine:
         if not origin or not break_time or not role:
             return None
         return f"{origin}|{break_time}|{role}|{break_type}"
+

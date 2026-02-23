@@ -3,6 +3,7 @@ from __future__ import annotations
 from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.detectors.fractal import FractalDetector
 from auto_eye.detectors.fvg import FVGDetector
+from auto_eye.detectors.rb import RBDetector
 from auto_eye.detectors.snr import SNRDetector
 
 
@@ -11,6 +12,7 @@ def build_detectors(names: list[str]) -> dict[str, MarketElementDetector]:
         "fvg": FVGDetector(),
         "fractal": FractalDetector(),
         "snr": SNRDetector(),
+        "rb": RBDetector(),
     }
 
     selected: dict[str, MarketElementDetector] = {}

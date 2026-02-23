@@ -9,7 +9,7 @@ from pathlib import Path
 
 from config_loader import AppConfig
 
-from auto_eye.exporters import resolve_output_path, state_json_path
+from auto_eye.exporters import ensure_exchange_structure, resolve_output_path, state_json_path
 from auto_eye.models import STATUS_INVALIDATED, STATUS_MITIGATED_FULL
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.timeframe_files import REQUIRED_STATE_TIMEFRAMES, STATE_SCHEMA_VERSION
@@ -37,7 +37,7 @@ class StateSnapshotBuilder:
         self.config = config
         self.source = source or MT5BarsSource(config)
         self.base_json_path = resolve_output_path(config.auto_eye.output_json)
-        self.state_dir = self.base_json_path.parent / "State"
+        self.state_dir = ensure_exchange_structure(self.base_json_path)["state"]
 
     def build_all(self, *, force_write: bool = False) -> StateSnapshotReport:
         symbols = self._resolve_symbols()
@@ -148,7 +148,7 @@ class StateSnapshotBuilder:
             return cls._empty_elements()
 
         elements = cls._empty_elements()
-        for key in ("fvg", "snr", "fractals"):
+        for key in ("fvg", "snr", "fractals", "rb"):
             if key == "fractals":
                 value = raw_elements.get("fractals")
                 if not isinstance(value, list):
@@ -208,6 +208,7 @@ class StateSnapshotBuilder:
             "fvg": [],
             "snr": [],
             "fractals": [],
+            "rb": [],
         }
 
     def _build_market(
@@ -291,3 +292,4 @@ class StateSnapshotBuilder:
 
         with schema_path.open("w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
+

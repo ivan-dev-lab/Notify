@@ -84,7 +84,7 @@ def build_config(output_root: Path) -> AppConfig:
             enabled=True,
             symbols=["SPX500"],
             timeframes=list(REQUIRED_TIMEFRAMES),
-            elements=["fvg", "fractal", "snr"],
+            elements=["fvg", "fractal", "snr", "rb"],
             history_days=30,
             history_buffer_days=5,
             incremental_bars=500,
@@ -108,11 +108,11 @@ def build_config(output_root: Path) -> AppConfig:
 class StateSnapshotBuilderTests(unittest.TestCase):
     def test_normalizes_existing_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            output_root = Path(tmp_dir) / "output"
+            output_root = Path(tmp_dir) / "Speculator" / "output"
             output_root.mkdir(parents=True, exist_ok=True)
             config = build_config(output_root)
 
-            state_path = output_root / "State" / "SPX500.json"
+            state_path = Path(tmp_dir) / "Exchange" / "State" / "SPX500.json"
             state_path.parent.mkdir(parents=True, exist_ok=True)
             existing_state = {
                 "symbol": "SPX500",
@@ -183,14 +183,17 @@ class StateSnapshotBuilderTests(unittest.TestCase):
             self.assertIn("fvg", h4["elements"])
             self.assertIn("snr", h4["elements"])
             self.assertIn("fractals", h4["elements"])
+            self.assertIn("rb", h4["elements"])
             self.assertEqual(h4["elements"]["snr"][0]["id"], "snr-1")
             self.assertEqual(len(h4["elements"]["snr"]), 1)
 
             self.assertNotIn("derived", state)
             self.assertNotIn("scenarios", state)
 
-            schema_path = output_root / "State" / "schema_version.json"
+            schema_path = Path(tmp_dir) / "Exchange" / "State" / "schema_version.json"
             self.assertTrue(schema_path.exists())
+            self.assertTrue((Path(tmp_dir) / "Exchange" / "Actions").exists())
+            self.assertTrue((Path(tmp_dir) / "Exchange" / "Decisions").exists())
 
             report_second = builder.build_all()
             self.assertEqual(report_second.files_updated, 0)
@@ -199,3 +202,5 @@ class StateSnapshotBuilderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

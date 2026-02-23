@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,8 @@ STATUS_MITIGATED_PARTIAL = "mitigated_partial"
 STATUS_MITIGATED_FULL = "mitigated_full"
 STATUS_RETESTED = "retested"
 STATUS_INVALIDATED = "invalidated"
+STATUS_BROKEN = "broken"
+STATUS_EXPIRED = "expired"
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -84,6 +87,8 @@ class TrackedElement:
             return self._to_fractal_dict()
         if normalized_type == "snr":
             return self._to_snr_dict()
+        if normalized_type == "rb":
+            return self._to_rb_dict()
         return self._to_fvg_dict()
 
     def _to_fvg_dict(self) -> dict[str, Any]:
@@ -217,6 +222,75 @@ class TrackedElement:
             "metadata": self.metadata,
         }
 
+    def _to_rb_dict(self) -> dict[str, Any]:
+        rb_type = str(self.metadata.get("rb_type") or self.direction or "")
+        pivot_time = datetime_from_iso(str(self.metadata.get("pivot_time") or ""))
+        if pivot_time is None:
+            pivot_time = self.c2_time
+        confirm_time = datetime_from_iso(str(self.metadata.get("confirm_time") or ""))
+        if confirm_time is None:
+            confirm_time = self.formation_time
+        if rb_type == "low":
+            l_fallback = self.zone_high
+            extreme_fallback = self.zone_low
+        else:
+            l_fallback = self.zone_low
+            extreme_fallback = self.zone_high
+
+        l_price = self._safe_float(
+            self.metadata.get("l_price"),
+            fallback=l_fallback,
+        )
+        l_alt_price = self._safe_float(
+            self.metadata.get("l_alt_price"),
+            fallback=l_price,
+        )
+        extreme_price = self._safe_float(
+            self.metadata.get("extreme_price"),
+            fallback=extreme_fallback,
+        )
+        rb_low = self._safe_float(
+            self.metadata.get("rb_low"),
+            fallback=min(l_price, extreme_price),
+        )
+        rb_high = self._safe_float(
+            self.metadata.get("rb_high"),
+            fallback=max(l_price, extreme_price),
+        )
+
+        broken_time = datetime_from_iso(str(self.metadata.get("broken_time") or ""))
+        if broken_time is None:
+            broken_time = self.mitigated_time
+
+        broken_side = self.metadata.get("broken_side")
+        if broken_side is None:
+            broken_side = None
+        else:
+            broken_side = str(broken_side)
+
+        return {
+            "id": self.id,
+            "element_type": "rb",
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "rb_type": rb_type,
+            "origin_fractal_id": str(self.metadata.get("origin_fractal_id") or ""),
+            "pivot_time": datetime_to_iso(pivot_time),
+            "confirm_time": datetime_to_iso(confirm_time),
+            "c1_time": datetime_to_iso(self.c1_time),
+            "c2_time": datetime_to_iso(self.c2_time),
+            "c3_time": datetime_to_iso(self.c3_time),
+            "l_price": l_price,
+            "l_alt_price": l_alt_price,
+            "extreme_price": extreme_price,
+            "rb_low": rb_low,
+            "rb_high": rb_high,
+            "status": self.status,
+            "broken_time": datetime_to_iso(broken_time),
+            "broken_side": broken_side,
+            "metadata": self.metadata,
+        }
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
         normalized_type = str(raw.get("element_type", "")).strip().lower()
@@ -224,6 +298,8 @@ class TrackedElement:
             return cls._from_fractal_dict(raw)
         if normalized_type == "snr":
             return cls._from_snr_dict(raw)
+        if normalized_type == "rb":
+            return cls._from_rb_dict(raw)
         return cls._from_fvg_dict(raw)
 
     @classmethod
@@ -430,6 +506,118 @@ class TrackedElement:
             touched_time=retest_time,
             mitigated_time=invalidated_time,
             fill_price=break_close,
+            fill_percent=None,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def _from_rb_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
+        c1_time = datetime_from_iso(
+            str(raw.get("c1_time") or raw.get("c1_time_utc") or "")
+        )
+        c2_time = datetime_from_iso(
+            str(raw.get("c2_time") or raw.get("c2_time_utc") or "")
+        )
+        c3_time = datetime_from_iso(
+            str(raw.get("c3_time") or raw.get("c3_time_utc") or "")
+        )
+        if c1_time is None or c2_time is None or c3_time is None:
+            return None
+
+        pivot_time = datetime_from_iso(
+            str(raw.get("pivot_time") or raw.get("pivot_time_utc") or "")
+        )
+        if pivot_time is None:
+            pivot_time = c2_time
+        confirm_time = datetime_from_iso(
+            str(raw.get("confirm_time") or raw.get("confirm_time_utc") or "")
+        )
+        if confirm_time is None:
+            confirm_time = c3_time
+
+        rb_type = str(raw.get("rb_type") or "")
+        if not rb_type:
+            rb_type = str(raw.get("direction") or "")
+        rb_type = rb_type.strip().lower()
+
+        l_price = cls._safe_optional_float(raw.get("l_price"))
+        l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
+        extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
+        rb_low = cls._safe_optional_float(raw.get("rb_low"))
+        rb_high = cls._safe_optional_float(raw.get("rb_high"))
+
+        if l_price is None and rb_type == "low" and rb_high is not None:
+            l_price = rb_high
+        if l_price is None and rb_low is not None:
+            l_price = rb_low
+        if extreme_price is None and rb_type == "low" and rb_low is not None:
+            extreme_price = rb_low
+        if extreme_price is None and rb_high is not None:
+            extreme_price = rb_high
+        if l_price is None or extreme_price is None:
+            return None
+        if l_alt_price is None:
+            l_alt_price = l_price
+
+        if rb_low is None:
+            rb_low = min(l_price, extreme_price)
+        if rb_high is None:
+            rb_high = max(l_price, extreme_price)
+
+        broken_time = datetime_from_iso(
+            str(raw.get("broken_time") or raw.get("broken_time_utc") or "")
+        )
+        broken_side_raw = raw.get("broken_side")
+        broken_side = None if broken_side_raw is None else str(broken_side_raw)
+
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(
+            {
+                "rb_type": rb_type,
+                "origin_fractal_id": str(raw.get("origin_fractal_id") or ""),
+                "pivot_time": datetime_to_iso(pivot_time),
+                "confirm_time": datetime_to_iso(confirm_time),
+                "c1_time": datetime_to_iso(c1_time),
+                "c2_time": datetime_to_iso(c2_time),
+                "c3_time": datetime_to_iso(c3_time),
+                "l_price": float(l_price),
+                "l_alt_price": float(l_alt_price),
+                "extreme_price": float(extreme_price),
+                "rb_low": float(rb_low),
+                "rb_high": float(rb_high),
+                "broken_time": datetime_to_iso(broken_time),
+                "broken_side": broken_side,
+            }
+        )
+
+        element_id = str(raw.get("id", "")).strip()
+        if not element_id:
+            seed = (
+                f"rb|{str(raw.get('symbol', ''))}|{str(raw.get('timeframe', '')).upper()}|"
+                f"{rb_type}|{datetime_to_iso(pivot_time) or ''}|{float(l_price):.10f}|"
+                f"{float(extreme_price):.10f}"
+            )
+            element_id = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20]
+
+        return cls(
+            id=element_id,
+            element_type="rb",
+            symbol=str(raw.get("symbol", "")),
+            timeframe=str(raw.get("timeframe", "")).upper(),
+            direction=rb_type,
+            formation_time=confirm_time,
+            zone_low=float(rb_low),
+            zone_high=float(rb_high),
+            zone_size=max(0.0, float(rb_high) - float(rb_low)),
+            c1_time=c1_time,
+            c2_time=c2_time,
+            c3_time=c3_time,
+            status=str(raw.get("status", STATUS_ACTIVE)),
+            touched_time=None,
+            mitigated_time=broken_time,
+            fill_price=None,
             fill_percent=None,
             metadata=metadata,
         )

@@ -133,11 +133,11 @@ python src/auto_eye_runner.py --config config/site_config.yaml --full-scan
 Результаты:
 
 - основной агрегированный снимок состояния:
-  `output/State/<SYMBOL>.json` (единый источник для Writer/автопланов)
-- в `State/<SYMBOL>.json` по каждому таймфрейму (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`) элементы разделены по типам: `fvg`, `snr`, `fractals`
-- `State/<SYMBOL>.json` перезаписывается только при изменениях соответствующего элемента/таймфрейма (новые элементы, смена статуса, обновление market/схемы)
+  `../Exchange/State/<SYMBOL>.json` (единый источник для Writer/автопланов)
+- в `../Exchange/State/<SYMBOL>.json` по каждому таймфрейму (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`) элементы разделены по типам: `fvg`, `snr`, `fractals`
+- `../Exchange/State/<SYMBOL>.json` перезаписывается только при изменениях соответствующего элемента/таймфрейма (новые элементы, смена статуса, обновление market/схемы)
 - для `SNR` зона хранится как `L ↔ departure-extreme` (поля `departure_extreme_price/time` и диапазон расчета)
-- в `output/State/schema_version.json` хранится версия схемы агрегированного состояния
+- в `../Exchange/State/schema_version.json` хранится версия схемы агрегированного состояния
 
 ## Сборка EXE (PyInstaller / auto-py-to-exe)
 
@@ -162,3 +162,5 @@ pyinstaller --noconfirm --clean --onedir --console --name bot --paths src --coll
 - Additional Arguments: `--paths src --collect-all MetaTrader5 --collect-all numpy`
 
 Если видите ошибку `ModuleNotFoundError: No module named 'numpy'`, значит `numpy` не был включен в сборку. Пересоберите с аргументом `--collect-all numpy`.
+
+

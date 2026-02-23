@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 STATE_SCHEMA_VERSION = "1.0.0"
 REQUIRED_STATE_TIMEFRAMES = ["M15", "H1", "H4", "D1", "W1", "MN1"]
-STATE_ELEMENT_KEYS = ("fvg", "snr", "fractals")
+STATE_ELEMENT_KEYS = ("fvg", "snr", "fractals", "rb")
 
 
 @dataclass
@@ -212,6 +212,8 @@ class TimeframeFileStore:
             return "snr"
         if normalized in {"fractal", "fractals"}:
             return "fractals"
+        if normalized in {"rb", "rangeblock", "range_block"}:
+            return "rb"
         return normalized
 
     def _resolve_last_bar(
@@ -287,6 +289,7 @@ class TimeframeFileStore:
             "fvg": [],
             "snr": [],
             "fractals": [],
+            "rb": [],
         }
 
     @classmethod
@@ -405,7 +408,7 @@ class TimeframeFileStore:
                 raw_type = str(item.get("element_type") or "").strip().lower()
                 if raw_type == "fractal":
                     converted["fractals"].append(item)
-                elif raw_type in {"fvg", "snr"}:
+                elif raw_type in {"fvg", "snr", "rb"}:
                     converted[raw_type].append(item)
             return converted
 
@@ -462,6 +465,32 @@ class TimeframeFileStore:
                 "status": raw.get("status"),
                 "retest_time_utc": raw.get("retest_time"),
                 "invalidated_time_utc": raw.get("invalidated_time"),
+                "metadata": metadata,
+            }
+        if element_type == "rb":
+            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            confirm_time = raw.get("confirm_time")
+            return {
+                "id": raw.get("id"),
+                "element_type": "rb",
+                "symbol": raw.get("symbol"),
+                "timeframe": raw.get("timeframe"),
+                "rb_type": raw.get("rb_type"),
+                "origin_fractal_id": raw.get("origin_fractal_id"),
+                "pivot_time_utc": raw.get("pivot_time"),
+                "confirm_time_utc": confirm_time,
+                "formation_time_utc": confirm_time,
+                "c1_time_utc": raw.get("c1_time"),
+                "c2_time_utc": raw.get("c2_time"),
+                "c3_time_utc": raw.get("c3_time"),
+                "l_price": raw.get("l_price"),
+                "l_alt_price": raw.get("l_alt_price"),
+                "extreme_price": raw.get("extreme_price"),
+                "rb_low": raw.get("rb_low"),
+                "rb_high": raw.get("rb_high"),
+                "status": raw.get("status"),
+                "broken_time_utc": raw.get("broken_time"),
+                "broken_side": raw.get("broken_side"),
                 "metadata": metadata,
             }
         return {
@@ -533,6 +562,34 @@ class TimeframeFileStore:
                 "retest_time": raw.get("retest_time_utc") or raw.get("retest_time"),
                 "invalidated_time": raw.get("invalidated_time_utc")
                 or raw.get("invalidated_time"),
+                "metadata": raw.get("metadata"),
+            }
+            return TrackedElement.from_dict(converted)
+
+        if element_type == "rb":
+            converted = {
+                "id": raw.get("id"),
+                "element_type": "rb",
+                "symbol": raw.get("symbol"),
+                "timeframe": raw.get("timeframe"),
+                "rb_type": raw.get("rb_type"),
+                "origin_fractal_id": raw.get("origin_fractal_id"),
+                "pivot_time": raw.get("pivot_time_utc") or raw.get("pivot_time"),
+                "confirm_time": raw.get("confirm_time_utc")
+                or raw.get("confirm_time")
+                or raw.get("formation_time_utc")
+                or raw.get("formation_time"),
+                "c1_time": raw.get("c1_time_utc") or raw.get("c1_time"),
+                "c2_time": raw.get("c2_time_utc") or raw.get("c2_time"),
+                "c3_time": raw.get("c3_time_utc") or raw.get("c3_time"),
+                "l_price": raw.get("l_price"),
+                "l_alt_price": raw.get("l_alt_price"),
+                "extreme_price": raw.get("extreme_price"),
+                "rb_low": raw.get("rb_low"),
+                "rb_high": raw.get("rb_high"),
+                "status": raw.get("status"),
+                "broken_time": raw.get("broken_time_utc") or raw.get("broken_time"),
+                "broken_side": raw.get("broken_side"),
                 "metadata": raw.get("metadata"),
             }
             return TrackedElement.from_dict(converted)
