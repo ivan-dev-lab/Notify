@@ -203,6 +203,12 @@ class AutoEyeEngine:
                 config=self.config.auto_eye,
             )
             for element in detected:
+                matched_id = self._find_matching_existing_id(
+                    candidate=element,
+                    existing=list(existing_by_id.values()),
+                )
+                if matched_id is not None and matched_id != element.id:
+                    element.id = matched_id
                 if element.id not in existing_by_id:
                     existing_by_id[element.id] = element
 
@@ -357,3 +363,33 @@ class AutoEyeEngine:
         values = list(deduplicated.values())
         values.sort(key=lambda item: (item.symbol, item.timeframe, item.c3_time, item.id))
         return values
+
+    @staticmethod
+    def _find_matching_existing_id(
+        *,
+        candidate: TrackedElement,
+        existing: list[TrackedElement],
+    ) -> str | None:
+        candidate_key = AutoEyeEngine._snr_identity_key(candidate)
+        if candidate_key is None:
+            return None
+        for item in existing:
+            if item.element_type != candidate.element_type:
+                continue
+            if AutoEyeEngine._snr_identity_key(item) == candidate_key:
+                return item.id
+        return None
+
+    @staticmethod
+    def _snr_identity_key(element: TrackedElement) -> str | None:
+        if element.element_type != "snr":
+            return None
+        origin = str(element.metadata.get("origin_fractal_id") or "").strip()
+        break_time = str(
+            element.metadata.get("break_time") or datetime_to_iso(element.c3_time) or ""
+        ).strip()
+        role = str(element.metadata.get("role") or element.direction or "").strip()
+        break_type = str(element.metadata.get("break_type") or "").strip()
+        if not origin or not break_time or not role:
+            return None
+        return f"{origin}|{break_time}|{role}|{break_type}"

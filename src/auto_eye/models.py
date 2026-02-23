@@ -152,6 +152,8 @@ class TrackedElement:
         if break_time is None:
             break_time = self.formation_time
         break_close = self._safe_optional_float(self.metadata.get("break_close"))
+        if break_close is None:
+            break_close = self._safe_optional_float(self.fill_price)
         l_price = self._safe_float(
             self.metadata.get("l_price"),
             fallback=self.zone_low,
@@ -168,6 +170,29 @@ class TrackedElement:
             self.metadata.get("snr_high"),
             fallback=self.zone_high,
         )
+        departure_extreme_price = self._safe_optional_float(
+            self.metadata.get("departure_extreme_price")
+        )
+        if departure_extreme_price is None:
+            if role == "support":
+                departure_extreme_price = snr_low
+            else:
+                departure_extreme_price = snr_high
+        departure_extreme_time = datetime_from_iso(
+            str(self.metadata.get("departure_extreme_time") or "")
+        )
+        if departure_extreme_time is None:
+            departure_extreme_time = break_time
+        departure_range_start_time = datetime_from_iso(
+            str(self.metadata.get("departure_range_start_time") or "")
+        )
+        if departure_range_start_time is None:
+            departure_range_start_time = break_time
+        departure_range_end_time = datetime_from_iso(
+            str(self.metadata.get("departure_range_end_time") or "")
+        )
+        if departure_range_end_time is None:
+            departure_range_end_time = break_time
         return {
             "id": self.id,
             "element_type": "snr",
@@ -182,6 +207,10 @@ class TrackedElement:
             "extreme_price": extreme_price,
             "snr_low": snr_low,
             "snr_high": snr_high,
+            "departure_extreme_price": departure_extreme_price,
+            "departure_extreme_time": datetime_to_iso(departure_extreme_time),
+            "departure_range_start_time": datetime_to_iso(departure_range_start_time),
+            "departure_range_end_time": datetime_to_iso(departure_range_end_time),
             "status": self.status,
             "retest_time": datetime_to_iso(self.touched_time),
             "invalidated_time": datetime_to_iso(self.mitigated_time),
@@ -327,12 +356,35 @@ class TrackedElement:
         if break_time is None:
             return None
 
+        role = str(raw.get("role") or "")
         snr_low = cls._safe_optional_float(raw.get("snr_low"))
         snr_high = cls._safe_optional_float(raw.get("snr_high"))
         l_price = cls._safe_optional_float(raw.get("l_price"))
         extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
         if snr_low is None or snr_high is None or l_price is None or extreme_price is None:
             return None
+
+        departure_extreme_price = cls._safe_optional_float(raw.get("departure_extreme_price"))
+        if departure_extreme_price is None:
+            if role == "support":
+                departure_extreme_price = snr_low
+            else:
+                departure_extreme_price = snr_high
+        departure_extreme_time = datetime_from_iso(
+            str(raw.get("departure_extreme_time") or "")
+        )
+        if departure_extreme_time is None:
+            departure_extreme_time = break_time
+        departure_range_start_time = datetime_from_iso(
+            str(raw.get("departure_range_start_time") or "")
+        )
+        if departure_range_start_time is None:
+            departure_range_start_time = break_time
+        departure_range_end_time = datetime_from_iso(
+            str(raw.get("departure_range_end_time") or "")
+        )
+        if departure_range_end_time is None:
+            departure_range_end_time = break_time
 
         retest_time = datetime_from_iso(str(raw.get("retest_time") or ""))
         invalidated_time = datetime_from_iso(str(raw.get("invalidated_time") or ""))
@@ -352,6 +404,10 @@ class TrackedElement:
                 "extreme_price": extreme_price,
                 "snr_low": snr_low,
                 "snr_high": snr_high,
+                "departure_extreme_price": departure_extreme_price,
+                "departure_extreme_time": datetime_to_iso(departure_extreme_time),
+                "departure_range_start_time": datetime_to_iso(departure_range_start_time),
+                "departure_range_end_time": datetime_to_iso(departure_range_end_time),
                 "retest_time": datetime_to_iso(retest_time),
                 "invalidated_time": datetime_to_iso(invalidated_time),
             }
@@ -362,7 +418,7 @@ class TrackedElement:
             element_type="snr",
             symbol=str(raw.get("symbol", "")),
             timeframe=str(raw.get("timeframe", "")).upper(),
-            direction=str(raw.get("role", "")),
+            direction=role,
             formation_time=break_time,
             zone_low=snr_low,
             zone_high=snr_high,

@@ -63,6 +63,8 @@ auto_eye:
   atr_period: 14
   median_body_period: 20
   fill_rule: "both"        # touch | full | both
+  snr_departure_start: "pivot"  # pivot | confirm
+  snr_include_break_candle: false
 ```
 
 Можно задавать MT5-данные через переменные окружения:
@@ -134,6 +136,7 @@ python src/auto_eye_runner.py --config config/site_config.yaml --full-scan
   `output/FVG/<SYMBOL>.json`, `output/Fractals/<SYMBOL>.json`, `output/SNR/<SYMBOL>.json`
 - в каждом файле актива хранятся данные по таймфреймам (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`)
 - файл актива перезаписывается только при изменениях соответствующего таймфрейма (новые элементы или смена статуса)
+- для `SNR` зона хранится как `L ↔ departure-extreme` (поля `departure_extreme_price/time` и диапазон расчета)
 
 ## Сборка EXE (PyInstaller / auto-py-to-exe)
 

@@ -16,10 +16,9 @@ from auto_eye.detectors.fractal import FRACTAL_HIGH, FRACTAL_LOW, FractalDetecto
 from auto_eye.detectors.snr import (
     BREAK_UP_CLOSE,
     ROLE_SUPPORT,
-    STATUS_INVALIDATED,
     SNRDetector,
 )
-from auto_eye.models import OHLCBar, TrackedElement
+from auto_eye.models import OHLCBar, STATUS_INVALIDATED, TrackedElement
 
 
 def build_config() -> AutoEyeConfig:
@@ -108,8 +107,12 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
         item = found[0]
         self.assertEqual(item.metadata.get("role"), ROLE_SUPPORT)
         self.assertEqual(item.metadata.get("break_type"), BREAK_UP_CLOSE)
-        self.assertAlmostEqual(float(item.metadata.get("snr_low")), 9.0)
-        self.assertAlmostEqual(float(item.metadata.get("snr_high")), 12.0)
+        self.assertAlmostEqual(float(item.metadata.get("snr_low")), 8.95)
+        self.assertAlmostEqual(float(item.metadata.get("snr_high")), 9.0)
+        self.assertAlmostEqual(float(item.metadata.get("departure_extreme_price")), 8.95)
+        self.assertIsNotNone(item.metadata.get("departure_extreme_time"))
+        self.assertIsNotNone(item.metadata.get("departure_range_start_time"))
+        self.assertIsNotNone(item.metadata.get("departure_range_end_time"))
 
     def test_snr_status_moves_to_invalidated_after_retest(self) -> None:
         bars = [
@@ -118,7 +121,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
             make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
             make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
             make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
-            make_bar(5, open_price=9.6, high_price=11.0, low_price=9.4, close_price=10.1),
+            make_bar(5, open_price=9.2, high_price=9.3, low_price=8.98, close_price=9.05),
             make_bar(6, open_price=8.9, high_price=9.1, low_price=8.5, close_price=8.7),
         ]
         found = self.snr.detect(
@@ -171,6 +174,45 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
         self.assertIsNotNone(restored_snr)
         assert restored_snr is not None
         self.assertEqual(restored_snr.element_type, "snr")
+
+    def test_snr_migrates_legacy_bounds_to_departure_extreme(self) -> None:
+        bars = [
+            make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=11.0),
+            make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
+            make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
+            make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
+        ]
+        current = self.snr.detect(
+            symbol="EURUSD",
+            timeframe="M15",
+            bars=bars,
+            point_size=0.0001,
+            config=self.config,
+        )[0]
+
+        legacy = TrackedElement.from_dict(current.to_dict())
+        self.assertIsNotNone(legacy)
+        assert legacy is not None
+        legacy.zone_low = 9.0
+        legacy.zone_high = 12.0
+        legacy.zone_size = 3.0
+        legacy.metadata["snr_low"] = 9.0
+        legacy.metadata["snr_high"] = 12.0
+        legacy.metadata.pop("departure_extreme_price", None)
+        legacy.metadata.pop("departure_extreme_time", None)
+        legacy.metadata.pop("departure_range_start_time", None)
+        legacy.metadata.pop("departure_range_end_time", None)
+
+        self.snr.update_status(
+            element=legacy,
+            bars=bars,
+            config=self.config,
+        )
+        self.assertAlmostEqual(legacy.zone_low, 8.95)
+        self.assertAlmostEqual(legacy.zone_high, 9.0)
+        self.assertIsNotNone(legacy.metadata.get("departure_extreme_price"))
+        self.assertIsNotNone(legacy.metadata.get("departure_extreme_time"))
 
 
 if __name__ == "__main__":

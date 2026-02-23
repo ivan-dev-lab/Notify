@@ -8,7 +8,7 @@ from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.exporters import resolve_output_path, resolve_storage_element_name
-from auto_eye.models import STATUS_ACTIVE, TrackedElement
+from auto_eye.models import STATUS_ACTIVE, TrackedElement, datetime_to_iso
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.scheduler import TimeframeScheduler
 from auto_eye.timeframe_files import TimeframeFileStore, TimeframeSnapshot
@@ -302,6 +302,12 @@ class TimeframeUpdateService:
                 config=self.config.auto_eye,
             )
             for item in detected:
+                matched_id = self._find_matching_existing_id(
+                    candidate=item,
+                    existing=list(detector_existing.values()),
+                )
+                if matched_id is not None and matched_id != item.id:
+                    item.id = matched_id
                 detector_existing.setdefault(item.id, item)
 
             for item in detector_existing.values():
@@ -331,12 +337,47 @@ class TimeframeUpdateService:
     def _element_state_changed(old: TrackedElement, new: TrackedElement) -> bool:
         return (
             old.status != new.status
+            or old.direction != new.direction
+            or old.zone_low != new.zone_low
+            or old.zone_high != new.zone_high
+            or old.zone_size != new.zone_size
             or old.touched_time != new.touched_time
             or old.mitigated_time != new.mitigated_time
             or old.fill_price != new.fill_price
             or old.fill_percent != new.fill_percent
+            or old.metadata != new.metadata
         )
 
     @staticmethod
     def _build_symbol_key(timeframe: str, symbol: str) -> str:
         return f"{timeframe.upper()}|{symbol}"
+
+    @staticmethod
+    def _find_matching_existing_id(
+        *,
+        candidate: TrackedElement,
+        existing: list[TrackedElement],
+    ) -> str | None:
+        candidate_key = TimeframeUpdateService._snr_identity_key(candidate)
+        if candidate_key is None:
+            return None
+        for item in existing:
+            if item.element_type != candidate.element_type:
+                continue
+            if TimeframeUpdateService._snr_identity_key(item) == candidate_key:
+                return item.id
+        return None
+
+    @staticmethod
+    def _snr_identity_key(element: TrackedElement) -> str | None:
+        if element.element_type != "snr":
+            return None
+        origin = str(element.metadata.get("origin_fractal_id") or "").strip()
+        break_time = str(
+            element.metadata.get("break_time") or datetime_to_iso(element.c3_time) or ""
+        ).strip()
+        role = str(element.metadata.get("role") or element.direction or "").strip()
+        break_type = str(element.metadata.get("break_type") or "").strip()
+        if not origin or not break_time or not role:
+            return None
+        return f"{origin}|{break_time}|{role}|{break_type}"

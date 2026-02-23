@@ -67,6 +67,8 @@ class AutoEyeConfig:
     atr_period: int
     median_body_period: int
     fill_rule: str
+    snr_departure_start: str = "pivot"
+    snr_include_break_candle: bool = False
 
 
 @dataclass
@@ -184,6 +186,12 @@ def load_config(config_path: Path) -> AppConfig:
     if fill_rule not in {"touch", "full", "both"}:
         fill_rule = "both"
 
+    snr_departure_start = str(
+        auto_eye_raw.get("snr_departure_start", "pivot")
+    ).strip().lower()
+    if snr_departure_start not in {"pivot", "confirm"}:
+        snr_departure_start = "pivot"
+
     return AppConfig(
         url=str(site.get("url", "")),
         browser=BrowserConfig(
@@ -239,5 +247,9 @@ def load_config(config_path: Path) -> AppConfig:
             atr_period=max(1, int(auto_eye_raw.get("atr_period", 14))),
             median_body_period=max(1, int(auto_eye_raw.get("median_body_period", 20))),
             fill_rule=fill_rule,
+            snr_departure_start=snr_departure_start,
+            snr_include_break_candle=bool(
+                auto_eye_raw.get("snr_include_break_candle", False)
+            ),
         ),
     )
