@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from app_logging import configure_logging
+from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.detectors.registry import build_detectors
 from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
 from config_loader import load_config
@@ -20,10 +21,26 @@ def summarize_reports(reports: list[TimeframeUpdateReport]) -> dict[str, object]
         "timeframes_skipped_no_data": sum(
             1 for report in reports if report.skipped_no_data
         ),
-        "new_fvg": sum(report.new_count for report in reports),
+        "new_elements": sum(report.new_count for report in reports),
         "status_updates": sum(report.status_updated_count for report in reports),
         "active_total": sum(report.total_active for report in reports),
     }
+
+
+def build_services(
+    detector_map: dict[str, MarketElementDetector],
+    *,
+    config,
+) -> list[tuple[str, TimeframeUpdateService]]:
+    services: list[tuple[str, TimeframeUpdateService]] = []
+    for name, detector in detector_map.items():
+        services.append(
+            (
+                name,
+                TimeframeUpdateService(config=config, detectors={name: detector}),
+            )
+        )
+    return services
 
 
 def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, object]:
@@ -38,27 +55,36 @@ def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, o
     logger.info("Starting auto-eye run with config: %s", config_path)
 
     detectors = build_detectors(config.auto_eye.elements)
-    service = TimeframeUpdateService(config=config, detectors=detectors)
+    services = build_services(detectors, config=config)
+    if not services:
+        raise RuntimeError("No detectors enabled in auto_eye.elements")
 
-    reports = service.run_all(force=True)
-    for report in reports:
-        logger.info(
-            "TF=%s file_updated=%s new=%s status_updated=%s active=%s total=%s msg=%s",
-            report.timeframe,
-            report.file_updated,
-            report.new_count,
-            report.status_updated_count,
-            report.total_active,
-            report.total_elements,
-            report.message,
-        )
-    payload = summarize_reports(reports)
+    all_reports: list[TimeframeUpdateReport] = []
+    for detector_name, service in services:
+        reports = service.run_all(force=True)
+        all_reports.extend(reports)
+        for report in reports:
+            logger.info(
+                "DET=%s TF=%s file_updated=%s new=%s status_updated=%s active=%s total=%s msg=%s",
+                detector_name,
+                report.timeframe,
+                report.file_updated,
+                report.new_count,
+                report.status_updated_count,
+                report.total_active,
+                report.total_elements,
+                report.message,
+            )
+
+    payload = summarize_reports(all_reports)
+    payload["detectors_processed"] = [name for name, _ in services]
 
     logger.info(
-        "Auto-eye run completed: processed=%s updated_files=%s new=%s status_updates=%s",
+        "Auto-eye run completed: detectors=%s processed=%s updated_files=%s new=%s status_updates=%s",
+        ",".join(payload["detectors_processed"]),
         payload["timeframes_processed"],
         payload["files_updated"],
-        payload["new_fvg"],
+        payload["new_elements"],
         payload["status_updates"],
     )
     return payload
@@ -76,24 +102,29 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
     logger.info("Starting auto-eye loop with config: %s", config_path)
 
     detectors = build_detectors(config.auto_eye.elements)
-    service = TimeframeUpdateService(config=config, detectors=detectors)
+    services = build_services(detectors, config=config)
+    if not services:
+        raise RuntimeError("No detectors enabled in auto_eye.elements")
 
     poll_seconds = max(10, config.auto_eye.scheduler_poll_seconds)
     logger.info(
-        "Auto-eye scheduler started: poll=%s sec, timeframes=%s",
+        "Auto-eye scheduler started: poll=%s sec, timeframes=%s detectors=%s",
         poll_seconds,
         ", ".join(config.auto_eye.timeframes),
+        ",".join(name for name, _ in services),
     )
 
     if force_full_scan:
         try:
-            initial_reports = service.run_all(force=True)
+            initial_reports: list[TimeframeUpdateReport] = []
+            for _, service in services:
+                initial_reports.extend(service.run_all(force=True))
             summary = summarize_reports(initial_reports)
             logger.info(
                 "Initial full scan done: processed=%s updated_files=%s new=%s status_updates=%s",
                 summary["timeframes_processed"],
                 summary["files_updated"],
-                summary["new_fvg"],
+                summary["new_elements"],
                 summary["status_updates"],
             )
         except Exception:
@@ -101,14 +132,16 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
 
     while True:
         try:
-            reports = service.run_due()
-            if reports:
+            reports: list[TimeframeUpdateReport] = []
+            for _, service in services:
+                reports.extend(service.run_due())
+            if len(reports) > 0:
                 summary = summarize_reports(reports)
                 logger.info(
                     "Scheduler cycle: processed=%s updated_files=%s new=%s status_updates=%s",
                     summary["timeframes_processed"],
                     summary["files_updated"],
-                    summary["new_fvg"],
+                    summary["new_elements"],
                     summary["status_updates"],
                 )
         except Exception:

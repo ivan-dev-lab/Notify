@@ -8,6 +8,8 @@ STATUS_ACTIVE = "active"
 STATUS_TOUCHED = "touched"
 STATUS_MITIGATED_PARTIAL = "mitigated_partial"
 STATUS_MITIGATED_FULL = "mitigated_full"
+STATUS_RETESTED = "retested"
+STATUS_INVALIDATED = "invalidated"
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -77,6 +79,14 @@ class TrackedElement:
             self.mitigated_time = ensure_utc(self.mitigated_time)
 
     def to_dict(self) -> dict[str, Any]:
+        normalized_type = self.element_type.strip().lower()
+        if normalized_type == "fractal":
+            return self._to_fractal_dict()
+        if normalized_type == "snr":
+            return self._to_snr_dict()
+        return self._to_fvg_dict()
+
+    def _to_fvg_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "element_type": self.element_type,
@@ -98,8 +108,97 @@ class TrackedElement:
             "metadata": self.metadata,
         }
 
+    def _to_fractal_dict(self) -> dict[str, Any]:
+        fractal_type = str(self.metadata.get("fractal_type") or self.direction or "")
+        pivot_time = datetime_from_iso(str(self.metadata.get("pivot_time") or ""))
+        if pivot_time is None:
+            pivot_time = self.c2_time
+        confirm_time = datetime_from_iso(str(self.metadata.get("confirm_time") or ""))
+        if confirm_time is None:
+            confirm_time = self.formation_time
+        extreme_price = self._safe_float(
+            self.metadata.get("extreme_price"),
+            fallback=self.zone_high,
+        )
+        l_price = self._safe_float(
+            self.metadata.get("l_price"),
+            fallback=self.zone_low,
+        )
+        l_alt_price = self._safe_float(
+            self.metadata.get("l_alt_price"),
+            fallback=l_price,
+        )
+        return {
+            "id": self.id,
+            "element_type": "fractal",
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "fractal_type": fractal_type,
+            "pivot_time": datetime_to_iso(pivot_time),
+            "confirm_time": datetime_to_iso(confirm_time),
+            "c1_time": datetime_to_iso(self.c1_time),
+            "c2_time": datetime_to_iso(self.c2_time),
+            "c3_time": datetime_to_iso(self.c3_time),
+            "extreme_price": extreme_price,
+            "l_price": l_price,
+            "l_alt_price": l_alt_price,
+            "metadata": self.metadata,
+        }
+
+    def _to_snr_dict(self) -> dict[str, Any]:
+        role = str(self.metadata.get("role") or self.direction or "")
+        break_type = str(self.metadata.get("break_type") or "")
+        break_time = datetime_from_iso(str(self.metadata.get("break_time") or ""))
+        if break_time is None:
+            break_time = self.formation_time
+        break_close = self._safe_optional_float(self.metadata.get("break_close"))
+        l_price = self._safe_float(
+            self.metadata.get("l_price"),
+            fallback=self.zone_low,
+        )
+        extreme_price = self._safe_float(
+            self.metadata.get("extreme_price"),
+            fallback=self.zone_high,
+        )
+        snr_low = self._safe_float(
+            self.metadata.get("snr_low"),
+            fallback=self.zone_low,
+        )
+        snr_high = self._safe_float(
+            self.metadata.get("snr_high"),
+            fallback=self.zone_high,
+        )
+        return {
+            "id": self.id,
+            "element_type": "snr",
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "origin_fractal_id": str(self.metadata.get("origin_fractal_id") or ""),
+            "role": role,
+            "break_type": break_type,
+            "break_time": datetime_to_iso(break_time),
+            "break_close": break_close,
+            "l_price": l_price,
+            "extreme_price": extreme_price,
+            "snr_low": snr_low,
+            "snr_high": snr_high,
+            "status": self.status,
+            "retest_time": datetime_to_iso(self.touched_time),
+            "invalidated_time": datetime_to_iso(self.mitigated_time),
+            "metadata": self.metadata,
+        }
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
+        normalized_type = str(raw.get("element_type", "")).strip().lower()
+        if normalized_type == "fractal":
+            return cls._from_fractal_dict(raw)
+        if normalized_type == "snr":
+            return cls._from_snr_dict(raw)
+        return cls._from_fvg_dict(raw)
+
+    @classmethod
+    def _from_fvg_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
         formation_time = datetime_from_iso(str(raw.get("formation_time") or ""))
         c1_time = datetime_from_iso(str(raw.get("c1_time") or ""))
         c2_time = datetime_from_iso(str(raw.get("c2_time") or ""))
@@ -159,6 +258,141 @@ class TrackedElement:
             fill_percent=fill_percent,
             metadata=metadata,
         )
+
+    @classmethod
+    def _from_fractal_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
+        c1_time = datetime_from_iso(str(raw.get("c1_time") or ""))
+        c2_time = datetime_from_iso(str(raw.get("c2_time") or ""))
+        c3_time = datetime_from_iso(str(raw.get("c3_time") or ""))
+        pivot_time = datetime_from_iso(str(raw.get("pivot_time") or ""))
+        confirm_time = datetime_from_iso(str(raw.get("confirm_time") or ""))
+        if c1_time is None or c2_time is None or c3_time is None:
+            return None
+        if pivot_time is None:
+            pivot_time = c2_time
+        if confirm_time is None:
+            confirm_time = c3_time
+
+        extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
+        l_price = cls._safe_optional_float(raw.get("l_price"))
+        l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
+        if extreme_price is None or l_price is None:
+            return None
+        if l_alt_price is None:
+            l_alt_price = l_price
+
+        zone_low = min(l_price, extreme_price)
+        zone_high = max(l_price, extreme_price)
+        zone_size = max(0.0, zone_high - zone_low)
+
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        fractal_type = str(raw.get("fractal_type") or metadata.get("fractal_type") or "")
+        metadata.update(
+            {
+                "fractal_type": fractal_type,
+                "pivot_time": datetime_to_iso(pivot_time),
+                "confirm_time": datetime_to_iso(confirm_time),
+                "extreme_price": extreme_price,
+                "l_price": l_price,
+                "l_alt_price": l_alt_price,
+            }
+        )
+
+        return cls(
+            id=str(raw.get("id", "")),
+            element_type="fractal",
+            symbol=str(raw.get("symbol", "")),
+            timeframe=str(raw.get("timeframe", "")).upper(),
+            direction=fractal_type,
+            formation_time=confirm_time,
+            zone_low=zone_low,
+            zone_high=zone_high,
+            zone_size=zone_size,
+            c1_time=c1_time,
+            c2_time=c2_time,
+            c3_time=c3_time,
+            status=str(raw.get("status", STATUS_ACTIVE)),
+            touched_time=None,
+            mitigated_time=None,
+            fill_price=None,
+            fill_percent=None,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def _from_snr_dict(cls, raw: dict[str, Any]) -> TrackedElement | None:
+        break_time = datetime_from_iso(str(raw.get("break_time") or ""))
+        if break_time is None:
+            return None
+
+        snr_low = cls._safe_optional_float(raw.get("snr_low"))
+        snr_high = cls._safe_optional_float(raw.get("snr_high"))
+        l_price = cls._safe_optional_float(raw.get("l_price"))
+        extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
+        if snr_low is None or snr_high is None or l_price is None or extreme_price is None:
+            return None
+
+        retest_time = datetime_from_iso(str(raw.get("retest_time") or ""))
+        invalidated_time = datetime_from_iso(str(raw.get("invalidated_time") or ""))
+        break_close = cls._safe_optional_float(raw.get("break_close"))
+
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(
+            {
+                "origin_fractal_id": str(raw.get("origin_fractal_id") or ""),
+                "role": str(raw.get("role") or ""),
+                "break_type": str(raw.get("break_type") or ""),
+                "break_time": datetime_to_iso(break_time),
+                "break_close": break_close,
+                "l_price": l_price,
+                "extreme_price": extreme_price,
+                "snr_low": snr_low,
+                "snr_high": snr_high,
+                "retest_time": datetime_to_iso(retest_time),
+                "invalidated_time": datetime_to_iso(invalidated_time),
+            }
+        )
+
+        return cls(
+            id=str(raw.get("id", "")),
+            element_type="snr",
+            symbol=str(raw.get("symbol", "")),
+            timeframe=str(raw.get("timeframe", "")).upper(),
+            direction=str(raw.get("role", "")),
+            formation_time=break_time,
+            zone_low=snr_low,
+            zone_high=snr_high,
+            zone_size=max(0.0, snr_high - snr_low),
+            c1_time=break_time,
+            c2_time=break_time,
+            c3_time=break_time,
+            status=str(raw.get("status", STATUS_ACTIVE)),
+            touched_time=retest_time,
+            mitigated_time=invalidated_time,
+            fill_price=break_close,
+            fill_percent=None,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _safe_float(value: object, *, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+
+    @staticmethod
+    def _safe_optional_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass

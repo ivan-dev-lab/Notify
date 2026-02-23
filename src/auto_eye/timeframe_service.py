@@ -216,7 +216,7 @@ class TimeframeUpdateService:
             )
             saved_paths = self.file_store.save(snapshot)
             logger.info(
-                "FVG %s updated: new=%s status_updated=%s active=%s total=%s asset_files=%s",
+                "AutoEye %s updated: new=%s status_updated=%s active=%s total=%s asset_files=%s",
                 timeframe,
                 new_count,
                 status_updates,
@@ -237,7 +237,7 @@ class TimeframeUpdateService:
             )
 
         logger.info(
-            "FVG %s no changes: new=%s status_updated=%s active=%s total=%s",
+            "AutoEye %s no changes: new=%s status_updated=%s active=%s total=%s",
             timeframe,
             new_count,
             status_updates,

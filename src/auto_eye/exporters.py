@@ -29,6 +29,12 @@ def sanitize_element_folder(element_name: str) -> str:
     normalized = str(element_name).strip().upper()
     if not normalized:
         return "FVG"
+    if normalized in {"FVG"}:
+        return "FVG"
+    if normalized in {"FRACTAL", "FRACTALS"}:
+        return "Fractals"
+    if normalized in {"SNR"}:
+        return "SNR"
     normalized = re.sub(r'[\\/:*?"<>|]+', "_", normalized)
     normalized = re.sub(r"\s+", "_", normalized)
     return normalized

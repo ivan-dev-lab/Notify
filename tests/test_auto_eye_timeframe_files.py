@@ -85,6 +85,25 @@ class TimeframeFileStoreTests(unittest.TestCase):
             self.assertEqual({item.symbol for item in loaded_m15.elements}, {"EURUSD", "GBPUSD"})
             self.assertEqual({item.timeframe for item in loaded_m15.elements}, {"M15"})
 
+    def test_store_uses_fractals_folder_for_fractal_element(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_json_path = Path(tmp_dir) / "auto_eye_zones.json"
+            store = TimeframeFileStore(base_json_path, element_name="fractal")
+
+            updated_at = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+            snapshot = TimeframeSnapshot(
+                timeframe="M15",
+                initialized=True,
+                updated_at_utc=updated_at,
+                last_bar_time_by_symbol={"EURUSD": updated_at},
+                elements=[make_element("EURUSD", "M15", 1)],
+            )
+            paths = store.save(snapshot)
+
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(paths[0].name, "EURUSD.json")
+            self.assertEqual(paths[0].parent.name, "Fractals")
+
 
 if __name__ == "__main__":
     unittest.main()

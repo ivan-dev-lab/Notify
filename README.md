@@ -8,7 +8,7 @@
 - `src/config_loader.py` — загрузка конфигурации
 - `src/main.py` — сбор котировок через MT5 и сохранение в JSON
 - `src/bot.py` — Telegram-бот на aiogram (inline UI + оповещения)
-- `src/auto_eye_runner.py` — запуск движка AutoEye (детекторы рыночных зон, сейчас FVG)
+- `src/auto_eye_runner.py` — запуск движка AutoEye (детекторы рыночных структур: FVG / fractal / SNR)
 - `src/auto_eye/` — модульная архитектура детекторов (расширяемо под FVG и другие элементы)
 
 ## Установка
@@ -49,7 +49,7 @@ auto_eye:
   enabled: true
   symbols: []              # empty -> scraper.assets
   timeframes: ["M15", "H1", "H4", "D1", "W1", "MN1"]
-  elements: ["fvg"]
+  elements: ["fvg"]  # fvg | fractal | snr
   history_days: 30
   history_buffer_days: 5
   incremental_bars: 500
@@ -130,9 +130,10 @@ python src/auto_eye_runner.py --config config/site_config.yaml --full-scan
 
 Результаты:
 
-- создаются отдельные JSON-файлы по активам в папке элемента (для FVG: `output/FVG/GBPUSD.json`, `output/FVG/EURUSD.json`, ...)
+- создаются отдельные JSON-файлы по активам в папке элемента:
+  `output/FVG/<SYMBOL>.json`, `output/Fractals/<SYMBOL>.json`, `output/SNR/<SYMBOL>.json`
 - в каждом файле актива хранятся данные по таймфреймам (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`)
-- файл актива перезаписывается только при изменениях соответствующего таймфрейма (новые FVG или смена статуса)
+- файл актива перезаписывается только при изменениях соответствующего таймфрейма (новые элементы или смена статуса)
 
 ## Сборка EXE (PyInstaller / auto-py-to-exe)
 
