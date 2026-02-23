@@ -57,6 +57,54 @@ class MT5BarsSource:
         except (TypeError, ValueError):
             return 0.0
 
+    def get_market_quote(self, symbol: str) -> dict[str, object] | None:
+        self._ensure_connected()
+        assert mt5 is not None
+
+        self._ensure_symbol_selected(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "symbol_info_tick returned None for %s: %s %s",
+                symbol,
+                error_code,
+                error_message,
+            )
+            return None
+
+        try:
+            bid = float(getattr(tick, "bid", 0.0) or 0.0)
+            ask = float(getattr(tick, "ask", 0.0) or 0.0)
+            last = float(getattr(tick, "last", 0.0) or 0.0)
+            tick_time_raw = int(getattr(tick, "time", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+
+        price = last
+        if price <= 0:
+            if bid > 0 and ask > 0:
+                price = (bid + ask) / 2.0
+            elif bid > 0:
+                price = bid
+            elif ask > 0:
+                price = ask
+        if price <= 0:
+            return None
+
+        if tick_time_raw > 0:
+            tick_time = datetime.fromtimestamp(tick_time_raw, tz=timezone.utc)
+        else:
+            tick_time = datetime.now(timezone.utc)
+
+        return {
+            "price": price,
+            "bid": bid if bid > 0 else None,
+            "ask": ask if ask > 0 else None,
+            "source": "MT5",
+            "tick_time_utc": tick_time.isoformat(),
+        }
+
     def fetch_history(
         self,
         *,

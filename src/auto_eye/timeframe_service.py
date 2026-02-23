@@ -8,7 +8,13 @@ from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.exporters import resolve_output_path, resolve_storage_element_name
-from auto_eye.models import STATUS_ACTIVE, TrackedElement, datetime_to_iso
+from auto_eye.models import (
+    STATUS_ACTIVE,
+    STATUS_INVALIDATED,
+    STATUS_MITIGATED_FULL,
+    TrackedElement,
+    datetime_to_iso,
+)
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.scheduler import TimeframeScheduler
 from auto_eye.timeframe_files import TimeframeFileStore, TimeframeSnapshot
@@ -189,10 +195,13 @@ class TimeframeUpdateService:
             element for element in next_elements if element.formation_time >= history_cutoff
         ]
         deduped_elements = self._deduplicate_elements(filtered_elements)
+        actual_elements = [
+            element for element in deduped_elements if self._is_actual_element(element)
+        ]
 
         new_count = 0
         status_updates = 0
-        for element in deduped_elements:
+        for element in actual_elements:
             old = old_by_id.get(element.id)
             if old is None:
                 new_count += 1
@@ -200,11 +209,20 @@ class TimeframeUpdateService:
             if self._element_state_changed(old, element):
                 status_updates += 1
 
+        previous_ids = {element.id for element in existing_elements}
+        current_ids = {element.id for element in actual_elements}
+        removed_count = len(previous_ids - current_ids)
+
         total_active = sum(
-            1 for element in deduped_elements if element.status == STATUS_ACTIVE
+            1 for element in actual_elements if element.status == STATUS_ACTIVE
         )
         primary_load = not previous.initialized
-        should_write = primary_load or new_count > 0 or status_updates > 0
+        should_write = (
+            primary_load
+            or new_count > 0
+            or status_updates > 0
+            or removed_count > 0
+        )
 
         if should_write:
             snapshot = TimeframeSnapshot(
@@ -212,16 +230,17 @@ class TimeframeUpdateService:
                 initialized=True,
                 updated_at_utc=now_utc,
                 last_bar_time_by_symbol=next_last_bar_by_symbol,
-                elements=deduped_elements,
+                elements=actual_elements,
             )
             saved_paths = self.file_store.save(snapshot)
             logger.info(
-                "AutoEye %s updated: new=%s status_updated=%s active=%s total=%s asset_files=%s",
+                "AutoEye %s updated: new=%s status_updated=%s removed=%s active=%s total=%s asset_files=%s",
                 timeframe,
                 new_count,
                 status_updates,
+                removed_count,
                 total_active,
-                len(deduped_elements),
+                len(actual_elements),
                 len(saved_paths),
             )
             return TimeframeUpdateReport(
@@ -232,7 +251,7 @@ class TimeframeUpdateService:
                 new_count=new_count,
                 status_updated_count=status_updates,
                 total_active=total_active,
-                total_elements=len(deduped_elements),
+                total_elements=len(actual_elements),
                 message="updated",
             )
 
@@ -242,7 +261,7 @@ class TimeframeUpdateService:
             new_count,
             status_updates,
             total_active,
-            len(deduped_elements),
+            len(actual_elements),
         )
         return TimeframeUpdateReport(
             timeframe=timeframe,
@@ -252,7 +271,7 @@ class TimeframeUpdateService:
             new_count=new_count,
             status_updated_count=status_updates,
             total_active=total_active,
-            total_elements=len(deduped_elements),
+            total_elements=len(actual_elements),
             message="no changes",
         )
 
@@ -347,6 +366,10 @@ class TimeframeUpdateService:
             or old.fill_percent != new.fill_percent
             or old.metadata != new.metadata
         )
+
+    @staticmethod
+    def _is_actual_element(element: TrackedElement) -> bool:
+        return element.status not in {STATUS_INVALIDATED, STATUS_MITIGATED_FULL}
 
     @staticmethod
     def _build_symbol_key(timeframe: str, symbol: str) -> str:

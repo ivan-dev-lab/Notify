@@ -6,12 +6,6 @@ from datetime import datetime, timedelta, timezone
 from config_loader import AppConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.exporters import (
-    asset_json_path,
-    export_json,
-    resolve_output_path,
-    resolve_storage_element_name,
-)
 from auto_eye.models import AutoEyeState, TrackedElement, datetime_to_iso
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.state_store import AutoEyeStateStore, resolve_path
@@ -175,7 +169,6 @@ class AutoEyeEngine:
             timeframes=timeframes,
             errors=errors,
         )
-        self._export_payload(exported_payload, state.elements)
         return exported_payload
 
     def _process_key_elements(
@@ -250,98 +243,11 @@ class AutoEyeEngine:
         payload: dict[str, object],
         elements: list[TrackedElement],
     ) -> None:
-        auto_eye_cfg = self.config.auto_eye
-        base_json_path = resolve_output_path(auto_eye_cfg.output_json)
-        detector_names = [
-            name
-            for name in self.detectors.keys()
-            if str(name).strip()
-        ]
-        if not detector_names:
-            detector_names = [resolve_storage_element_name([])]
-
-        raw_symbols = payload.get("symbols")
-        symbols: list[str] = []
-        if isinstance(raw_symbols, list):
-            for item in raw_symbols:
-                normalized = str(item).strip()
-                if normalized and normalized not in symbols:
-                    symbols.append(normalized)
-
-        raw_timeframes = payload.get("timeframes")
-        base_timeframes: list[str] = []
-        if isinstance(raw_timeframes, list):
-            for item in raw_timeframes:
-                normalized = str(item).strip().upper()
-                if normalized and normalized not in base_timeframes:
-                    base_timeframes.append(normalized)
-
-        for detector_name in detector_names:
-            storage_element = resolve_storage_element_name([detector_name])
-            typed_elements = [
-                item for item in elements if item.element_type == detector_name
-            ]
-            elements_by_symbol: dict[str, list[TrackedElement]] = {}
-            for element in typed_elements:
-                elements_by_symbol.setdefault(element.symbol, []).append(element)
-                if element.symbol not in symbols:
-                    symbols.append(element.symbol)
-
-            for symbol in symbols:
-                symbol_elements = sorted(
-                    elements_by_symbol.get(symbol, []),
-                    key=lambda item: (item.timeframe, item.c3_time, item.id),
-                )
-                elements_by_timeframe: dict[str, list[TrackedElement]] = {}
-                timeframes = list(base_timeframes)
-                for item in symbol_elements:
-                    key = item.timeframe.upper()
-                    elements_by_timeframe.setdefault(key, []).append(item)
-                    if key not in timeframes:
-                        timeframes.append(key)
-
-                raw_errors = payload.get("errors", [])
-                symbol_errors: list[str] = []
-                if isinstance(raw_errors, list):
-                    symbol_errors = [
-                        error
-                        for error in raw_errors
-                        if isinstance(error, str) and error.startswith(f"{symbol} ")
-                    ]
-
-                timeframe_payload: dict[str, object] = {}
-                for timeframe in timeframes:
-                    timeframe_elements = sorted(
-                        elements_by_timeframe.get(timeframe, []),
-                        key=lambda item: (item.c3_time, item.id),
-                    )
-                    last_bar_time = None
-                    if timeframe_elements:
-                        last_bar_time = max(item.c3_time for item in timeframe_elements)
-                    timeframe_payload[timeframe] = {
-                        "initialized": bool(timeframe_elements),
-                        "updated_at_utc": payload.get("generated_at_utc"),
-                        "last_bar_time": datetime_to_iso(last_bar_time),
-                        "elements": [item.to_dict() for item in timeframe_elements],
-                    }
-
-                symbol_payload = {
-                    "updated_at_utc": payload.get("generated_at_utc"),
-                    "source": payload.get("source"),
-                    "symbol": symbol,
-                    "enabled_elements": [detector_name],
-                    "count": len(symbol_elements),
-                    "errors": symbol_errors,
-                    "timeframes": timeframe_payload,
-                }
-                export_json(
-                    asset_json_path(
-                        base_json_path,
-                        symbol,
-                        element_name=storage_element,
-                    ),
-                    symbol_payload,
-                )
+        _ = payload
+        _ = elements
+        logger.debug(
+            "Legacy per-element export is disabled. Use output/State/<SYMBOL>.json as source of truth."
+        )
 
     def _resolve_symbols(self) -> list[str]:
         symbols: list[str] = []

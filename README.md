@@ -132,11 +132,12 @@ python src/auto_eye_runner.py --config config/site_config.yaml --full-scan
 
 Результаты:
 
-- создаются отдельные JSON-файлы по активам в папке элемента:
-  `output/FVG/<SYMBOL>.json`, `output/Fractals/<SYMBOL>.json`, `output/SNR/<SYMBOL>.json`
-- в каждом файле актива хранятся данные по таймфреймам (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`)
-- файл актива перезаписывается только при изменениях соответствующего таймфрейма (новые элементы или смена статуса)
+- основной агрегированный снимок состояния:
+  `output/State/<SYMBOL>.json` (единый источник для Writer/автопланов)
+- в `State/<SYMBOL>.json` по каждому таймфрейму (`M15`, `H1`, `H4`, `D1`, `W1`, `MN1`) элементы разделены по типам: `fvg`, `snr`, `fractals`
+- `State/<SYMBOL>.json` перезаписывается только при изменениях соответствующего элемента/таймфрейма (новые элементы, смена статуса, обновление market/схемы)
 - для `SNR` зона хранится как `L ↔ departure-extreme` (поля `departure_extreme_price/time` и диапазон расчета)
+- в `output/State/schema_version.json` хранится версия схемы агрегированного состояния
 
 ## Сборка EXE (PyInstaller / auto-py-to-exe)
 

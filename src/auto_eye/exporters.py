@@ -53,6 +53,10 @@ def asset_json_path(base_json_path: Path, asset: str, *, element_name: str = "FV
     return base_json_path.parent / folder / f"{sanitize_asset_filename(asset)}.json"
 
 
+def state_json_path(base_json_path: Path, asset: str) -> Path:
+    return base_json_path.parent / "State" / f"{sanitize_asset_filename(asset)}.json"
+
+
 def export_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:

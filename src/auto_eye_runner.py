@@ -8,6 +8,7 @@ from pathlib import Path
 from app_logging import configure_logging
 from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.detectors.registry import build_detectors
+from auto_eye.state_snapshot import StateSnapshotBuilder
 from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
 from config_loader import load_config
 
@@ -25,6 +26,20 @@ def summarize_reports(reports: list[TimeframeUpdateReport]) -> dict[str, object]
         "status_updates": sum(report.status_updated_count for report in reports),
         "active_total": sum(report.total_active for report in reports),
     }
+
+
+def merge_state_summary(
+    payload: dict[str, object],
+    *,
+    state_files_updated: int,
+    state_files_unchanged: int,
+    state_errors: list[str],
+) -> dict[str, object]:
+    merged = dict(payload)
+    merged["state_files_updated"] = state_files_updated
+    merged["state_files_unchanged"] = state_files_unchanged
+    merged["state_errors"] = state_errors
+    return merged
 
 
 def build_services(
@@ -78,12 +93,21 @@ def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, o
 
     payload = summarize_reports(all_reports)
     payload["detectors_processed"] = [name for name, _ in services]
+    state_builder = StateSnapshotBuilder(config=config)
+    state_report = state_builder.build_all(force_write=False)
+    payload = merge_state_summary(
+        payload,
+        state_files_updated=state_report.files_updated,
+        state_files_unchanged=state_report.files_unchanged,
+        state_errors=state_report.errors,
+    )
 
     logger.info(
-        "Auto-eye run completed: detectors=%s processed=%s updated_files=%s new=%s status_updates=%s",
+        "Auto-eye run completed: detectors=%s processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
         ",".join(payload["detectors_processed"]),
         payload["timeframes_processed"],
         payload["files_updated"],
+        payload["state_files_updated"],
         payload["new_elements"],
         payload["status_updates"],
     )
@@ -120,10 +144,13 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
             for _, service in services:
                 initial_reports.extend(service.run_all(force=True))
             summary = summarize_reports(initial_reports)
+            state_builder = StateSnapshotBuilder(config=config)
+            state_report = state_builder.build_all(force_write=False)
             logger.info(
-                "Initial full scan done: processed=%s updated_files=%s new=%s status_updates=%s",
+                "Initial full scan done: processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
                 summary["timeframes_processed"],
                 summary["files_updated"],
+                state_report.files_updated,
                 summary["new_elements"],
                 summary["status_updates"],
             )
@@ -137,10 +164,13 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
                 reports.extend(service.run_due())
             if len(reports) > 0:
                 summary = summarize_reports(reports)
+                state_builder = StateSnapshotBuilder(config=config)
+                state_report = state_builder.build_all(force_write=False)
                 logger.info(
-                    "Scheduler cycle: processed=%s updated_files=%s new=%s status_updates=%s",
+                    "Scheduler cycle: processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
                     summary["timeframes_processed"],
                     summary["files_updated"],
+                    state_report.files_updated,
                     summary["new_elements"],
                     summary["status_updates"],
                 )

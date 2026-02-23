@@ -10,12 +10,15 @@ from auto_eye.models import (
     STATUS_TOUCHED,
     TrackedElement,
 )
+from auto_eye.state_snapshot import StateSnapshotBuilder, StateSnapshotReport
 from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
 
 __all__ = [
     "AutoEyeEngine",
     "TimeframeUpdateService",
     "TimeframeUpdateReport",
+    "StateSnapshotBuilder",
+    "StateSnapshotReport",
     "AutoEyeState",
     "OHLCBar",
     "TrackedElement",
