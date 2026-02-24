@@ -715,10 +715,10 @@ class AlertStore:
                         continue
 
                     if now_utc >= trigger_at:
-                        is_price_condition_met = (
-                            cross_met
-                            if alert.direction in {CROSS_TOP_DOWN, CROSS_BOTTOM_UP}
-                            else condition_met
+                        is_price_condition_met = compare_candle_close_condition(
+                            current_value,
+                            alert.direction,
+                            alert.target,
                         )
                         if is_price_condition_met:
                             triggered.append(
@@ -739,6 +739,17 @@ class AlertStore:
                             active.append(alert)
                             continue
 
+                        logger.info(
+                            "Price-time candle check not met user_id=%s asset=%s tf=%s direction=%s target=%s current=%s trigger_at_utc=%s -> next_trigger_utc=%s",
+                            alert.user_id,
+                            alert.asset,
+                            alert.timeframe_code,
+                            alert.direction,
+                            alert.target,
+                            current_text,
+                            trigger_at.isoformat(),
+                            next_trigger.isoformat(),
+                        )
                         alert.trigger_at_utc = next_trigger.isoformat()
                         has_state_changes = True
                         active.append(alert)
@@ -790,6 +801,14 @@ def compare_by_direction(current_value: float, direction: str, target: float) ->
     if direction == DIRECTION_BELOW:
         return current_value <= target
     return False
+
+
+def compare_candle_close_condition(current_value: float, direction: str, target: float) -> bool:
+    if direction == CROSS_TOP_DOWN:
+        return current_value <= target
+    if direction == CROSS_BOTTOM_UP:
+        return current_value >= target
+    return compare_by_direction(current_value, direction, target)
 
 
 def is_cross_triggered(
