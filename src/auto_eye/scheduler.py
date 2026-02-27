@@ -26,8 +26,9 @@ class TimeframeScheduler:
         if last is None:
             return True
 
-        if normalized_tf in {"M15", "H1", "H4"}:
+        if normalized_tf in {"M5", "M15", "H1", "H4"}:
             period_seconds = {
+                "M5": 5 * 60,
                 "M15": 15 * 60,
                 "H1": 60 * 60,
                 "H4": 4 * 60 * 60,

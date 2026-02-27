@@ -29,6 +29,18 @@ class TimeframeSchedulerTests(unittest.TestCase):
             self.scheduler.is_due(timeframe="M15", now_utc=now_due, last_check_utc=last)
         )
 
+    def test_m5_schedule(self) -> None:
+        last = datetime(2026, 2, 21, 10, 4, tzinfo=timezone.utc)
+        now_not_due = datetime(2026, 2, 21, 10, 4, 59, tzinfo=timezone.utc)
+        now_due = datetime(2026, 2, 21, 10, 5, 0, tzinfo=timezone.utc)
+
+        self.assertFalse(
+            self.scheduler.is_due(timeframe="M5", now_utc=now_not_due, last_check_utc=last)
+        )
+        self.assertTrue(
+            self.scheduler.is_due(timeframe="M5", now_utc=now_due, last_check_utc=last)
+        )
+
     def test_h1_schedule(self) -> None:
         last = datetime(2026, 2, 21, 10, 5, tzinfo=timezone.utc)
         now = datetime(2026, 2, 21, 11, 0, tzinfo=timezone.utc)

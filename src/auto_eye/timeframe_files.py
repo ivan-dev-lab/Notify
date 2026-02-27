@@ -13,7 +13,7 @@ from auto_eye.models import TrackedElement, datetime_from_iso, datetime_to_iso
 logger = logging.getLogger(__name__)
 
 STATE_SCHEMA_VERSION = "1.0.0"
-REQUIRED_STATE_TIMEFRAMES = ["M15", "H1", "H4", "D1", "W1", "MN1"]
+REQUIRED_STATE_TIMEFRAMES = ["M5", "M15", "H1", "H4", "D1", "W1", "MN1"]
 STATE_ELEMENT_KEYS = ("fvg", "snr", "fractals", "rb")
 
 
