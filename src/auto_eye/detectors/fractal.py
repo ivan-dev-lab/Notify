@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
@@ -86,8 +86,16 @@ class FractalDetector(MarketElementDetector):
         c3: OHLCBar,
         extreme_price: float,
     ) -> TrackedElement:
-        l_price = float(c1.close)
-        l_alt_price = float(c2.open)
+        l_price_bearish = float(c1.close)
+        l_alt_bearish = float(c2.open)
+
+        l_price_bullish = float(c2.close)
+        l_alt_bullish = float(c1.open)
+
+        # Backward compatibility aliases.
+        l_price = l_price_bearish
+        l_alt_price = l_alt_bearish
+
         zone_low = min(l_price, extreme_price)
         zone_high = max(l_price, extreme_price)
         zone_size = max(0.0, zone_high - zone_low)
@@ -121,6 +129,10 @@ class FractalDetector(MarketElementDetector):
                 "extreme_price": float(extreme_price),
                 "l_price": l_price,
                 "l_alt_price": l_alt_price,
+                "l_price_bearish": l_price_bearish,
+                "l_alt_bearish": l_alt_bearish,
+                "l_price_bullish": l_price_bullish,
+                "l_alt_bullish": l_alt_bullish,
             },
         )
 

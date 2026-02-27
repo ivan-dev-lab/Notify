@@ -91,7 +91,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
     def test_snr_appears_only_after_break_close(self) -> None:
         bars = [
             make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
-            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=11.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=9.15),
             make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
             make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
             make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
@@ -108,16 +108,18 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
         self.assertEqual(item.metadata.get("role"), ROLE_SUPPORT)
         self.assertEqual(item.metadata.get("break_type"), BREAK_UP_CLOSE)
         self.assertAlmostEqual(float(item.metadata.get("snr_low")), 8.95)
-        self.assertAlmostEqual(float(item.metadata.get("snr_high")), 9.0)
+        self.assertAlmostEqual(float(item.metadata.get("snr_high")), 9.15)
         self.assertAlmostEqual(float(item.metadata.get("departure_extreme_price")), 8.95)
         self.assertIsNotNone(item.metadata.get("departure_extreme_time"))
         self.assertIsNotNone(item.metadata.get("departure_range_start_time"))
         self.assertIsNotNone(item.metadata.get("departure_range_end_time"))
+        self.assertAlmostEqual(float(item.metadata.get("l_price_used")), 9.15)
+        self.assertEqual(item.metadata.get("l_rule_used"), "bullish_C2close")
 
     def test_snr_status_moves_to_invalidated_after_retest(self) -> None:
         bars = [
             make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
-            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=11.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=9.15),
             make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
             make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
             make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
@@ -140,7 +142,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
     def test_serialization_roundtrip_for_fractal_and_snr(self) -> None:
         bars = [
             make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
-            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=11.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=9.15),
             make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
             make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
             make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
@@ -178,7 +180,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
     def test_snr_migrates_legacy_bounds_to_departure_extreme(self) -> None:
         bars = [
             make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
-            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=11.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=9.15),
             make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
             make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
             make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
@@ -210,7 +212,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
             config=self.config,
         )
         self.assertAlmostEqual(legacy.zone_low, 8.95)
-        self.assertAlmostEqual(legacy.zone_high, 9.0)
+        self.assertAlmostEqual(legacy.zone_high, 9.15)
         self.assertIsNotNone(legacy.metadata.get("departure_extreme_price"))
         self.assertIsNotNone(legacy.metadata.get("departure_extreme_time"))
 

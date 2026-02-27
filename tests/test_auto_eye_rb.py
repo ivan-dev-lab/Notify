@@ -95,6 +95,8 @@ class RBDetectorTests(unittest.TestCase):
         self.assertAlmostEqual(float(item.metadata.get("extreme_price")), 12.0)
         self.assertAlmostEqual(float(item.metadata.get("rb_low")), 9.0)
         self.assertAlmostEqual(float(item.metadata.get("rb_high")), 12.0)
+        self.assertAlmostEqual(float(item.metadata.get("l_price_used")), 9.0)
+        self.assertEqual(item.metadata.get("l_rule_used"), "bearish_C1close")
 
     def test_rb_id_is_stable_between_runs(self) -> None:
         bars = [
@@ -156,6 +158,8 @@ class RBDetectorTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         item = found[0]
         self.assertEqual(item.metadata.get("rb_type"), "low")
+        self.assertAlmostEqual(float(item.metadata.get("l_price_used")), 8.5)
+        self.assertEqual(item.metadata.get("l_rule_used"), "bullish_C2close")
         self.rb.update_status(element=item, bars=bars, config=self.config)
         self.assertEqual(item.status, STATUS_BROKEN)
         self.assertEqual(item.metadata.get("broken_side"), "down")

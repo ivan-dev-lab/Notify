@@ -133,6 +133,22 @@ class TrackedElement:
             self.metadata.get("l_alt_price"),
             fallback=l_price,
         )
+        l_price_bearish = self._safe_float(
+            self.metadata.get("l_price_bearish"),
+            fallback=l_price,
+        )
+        l_alt_bearish = self._safe_float(
+            self.metadata.get("l_alt_bearish"),
+            fallback=l_alt_price,
+        )
+        l_price_bullish = self._safe_float(
+            self.metadata.get("l_price_bullish"),
+            fallback=l_price_bearish,
+        )
+        l_alt_bullish = self._safe_float(
+            self.metadata.get("l_alt_bullish"),
+            fallback=l_price_bullish,
+        )
         return {
             "id": self.id,
             "element_type": "fractal",
@@ -147,6 +163,10 @@ class TrackedElement:
             "extreme_price": extreme_price,
             "l_price": l_price,
             "l_alt_price": l_alt_price,
+            "l_price_bearish": l_price_bearish,
+            "l_alt_bearish": l_alt_bearish,
+            "l_price_bullish": l_price_bullish,
+            "l_alt_bullish": l_alt_bullish,
             "metadata": self.metadata,
         }
 
@@ -162,6 +182,34 @@ class TrackedElement:
         l_price = self._safe_float(
             self.metadata.get("l_price"),
             fallback=self.zone_low,
+        )
+        l_alt_price = self._safe_float(
+            self.metadata.get("l_alt_price"),
+            fallback=l_price,
+        )
+        l_price_bearish = self._safe_float(
+            self.metadata.get("l_price_bearish"),
+            fallback=l_price,
+        )
+        l_alt_bearish = self._safe_float(
+            self.metadata.get("l_alt_bearish"),
+            fallback=l_alt_price,
+        )
+        l_price_bullish = self._safe_float(
+            self.metadata.get("l_price_bullish"),
+            fallback=l_price_bearish,
+        )
+        l_alt_bullish = self._safe_float(
+            self.metadata.get("l_alt_bullish"),
+            fallback=l_price_bullish,
+        )
+        l_price_used = self._safe_float(
+            self.metadata.get("l_price_used"),
+            fallback=l_price,
+        )
+        l_rule_used = str(
+            self.metadata.get("l_rule_used")
+            or ("bullish_C2close" if role == "support" else "bearish_C1close")
         )
         extreme_price = self._safe_float(
             self.metadata.get("extreme_price"),
@@ -209,6 +257,13 @@ class TrackedElement:
             "break_time": datetime_to_iso(break_time),
             "break_close": break_close,
             "l_price": l_price,
+            "l_alt_price": l_alt_price,
+            "l_price_bearish": l_price_bearish,
+            "l_alt_bearish": l_alt_bearish,
+            "l_price_bullish": l_price_bullish,
+            "l_alt_bullish": l_alt_bullish,
+            "l_price_used": l_price_used,
+            "l_rule_used": l_rule_used,
             "extreme_price": extreme_price,
             "snr_low": snr_low,
             "snr_high": snr_high,
@@ -244,6 +299,30 @@ class TrackedElement:
         l_alt_price = self._safe_float(
             self.metadata.get("l_alt_price"),
             fallback=l_price,
+        )
+        l_price_bearish = self._safe_float(
+            self.metadata.get("l_price_bearish"),
+            fallback=l_price,
+        )
+        l_alt_bearish = self._safe_float(
+            self.metadata.get("l_alt_bearish"),
+            fallback=l_alt_price,
+        )
+        l_price_bullish = self._safe_float(
+            self.metadata.get("l_price_bullish"),
+            fallback=l_price_bearish,
+        )
+        l_alt_bullish = self._safe_float(
+            self.metadata.get("l_alt_bullish"),
+            fallback=l_price_bullish,
+        )
+        l_price_used = self._safe_float(
+            self.metadata.get("l_price_used"),
+            fallback=l_price,
+        )
+        l_rule_used = str(
+            self.metadata.get("l_rule_used")
+            or ("bullish_C2close" if rb_type == "low" else "bearish_C1close")
         )
         extreme_price = self._safe_float(
             self.metadata.get("extreme_price"),
@@ -282,6 +361,14 @@ class TrackedElement:
             "c3_time": datetime_to_iso(self.c3_time),
             "l_price": l_price,
             "l_alt_price": l_alt_price,
+            "l_price_bearish": l_price_bearish,
+            "l_alt_bearish": l_alt_bearish,
+            "l_price_bullish": l_price_bullish,
+            "l_alt_bullish": l_alt_bullish,
+            "l_price_used": l_price_used,
+            "l_rule_used": l_rule_used,
+            "line_used": l_price_used,
+            "line_rule_used": l_rule_used,
             "extreme_price": extreme_price,
             "rb_low": rb_low,
             "rb_high": rb_high,
@@ -381,10 +468,22 @@ class TrackedElement:
         extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
         l_price = cls._safe_optional_float(raw.get("l_price"))
         l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
+        l_price_bearish = cls._safe_optional_float(raw.get("l_price_bearish"))
+        l_alt_bearish = cls._safe_optional_float(raw.get("l_alt_bearish"))
+        l_price_bullish = cls._safe_optional_float(raw.get("l_price_bullish"))
+        l_alt_bullish = cls._safe_optional_float(raw.get("l_alt_bullish"))
         if extreme_price is None or l_price is None:
             return None
         if l_alt_price is None:
             l_alt_price = l_price
+        if l_price_bearish is None:
+            l_price_bearish = l_price
+        if l_alt_bearish is None:
+            l_alt_bearish = l_alt_price
+        if l_price_bullish is None:
+            l_price_bullish = l_price_bearish
+        if l_alt_bullish is None:
+            l_alt_bullish = l_price_bullish
 
         zone_low = min(l_price, extreme_price)
         zone_high = max(l_price, extreme_price)
@@ -402,6 +501,10 @@ class TrackedElement:
                 "extreme_price": extreme_price,
                 "l_price": l_price,
                 "l_alt_price": l_alt_price,
+                "l_price_bearish": l_price_bearish,
+                "l_alt_bearish": l_alt_bearish,
+                "l_price_bullish": l_price_bullish,
+                "l_alt_bullish": l_alt_bullish,
             }
         )
 
@@ -436,9 +539,41 @@ class TrackedElement:
         snr_low = cls._safe_optional_float(raw.get("snr_low"))
         snr_high = cls._safe_optional_float(raw.get("snr_high"))
         l_price = cls._safe_optional_float(raw.get("l_price"))
+        l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
+        l_price_bearish = cls._safe_optional_float(raw.get("l_price_bearish"))
+        l_alt_bearish = cls._safe_optional_float(raw.get("l_alt_bearish"))
+        l_price_bullish = cls._safe_optional_float(raw.get("l_price_bullish"))
+        l_alt_bullish = cls._safe_optional_float(raw.get("l_alt_bullish"))
+        l_price_used = cls._safe_optional_float(raw.get("l_price_used"))
+        l_rule_used = str(raw.get("l_rule_used") or "")
         extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
-        if snr_low is None or snr_high is None or l_price is None or extreme_price is None:
+        if l_price is None:
+            l_price = l_price_used
+        if l_price is None and role == "support":
+            l_price = snr_high
+        if l_price is None and role == "resistance":
+            l_price = snr_low
+        if (
+            snr_low is None
+            or snr_high is None
+            or l_price is None
+            or extreme_price is None
+        ):
             return None
+        if l_alt_price is None:
+            l_alt_price = l_price
+        if l_price_bearish is None:
+            l_price_bearish = l_price
+        if l_alt_bearish is None:
+            l_alt_bearish = l_alt_price
+        if l_price_bullish is None:
+            l_price_bullish = l_price
+        if l_alt_bullish is None:
+            l_alt_bullish = l_alt_price
+        if l_price_used is None:
+            l_price_used = l_price
+        if not l_rule_used:
+            l_rule_used = "bullish_C2close" if role == "support" else "bearish_C1close"
 
         departure_extreme_price = cls._safe_optional_float(raw.get("departure_extreme_price"))
         if departure_extreme_price is None:
@@ -477,6 +612,13 @@ class TrackedElement:
                 "break_time": datetime_to_iso(break_time),
                 "break_close": break_close,
                 "l_price": l_price,
+                "l_alt_price": l_alt_price,
+                "l_price_bearish": l_price_bearish,
+                "l_alt_bearish": l_alt_bearish,
+                "l_price_bullish": l_price_bullish,
+                "l_alt_bullish": l_alt_bullish,
+                "l_price_used": l_price_used,
+                "l_rule_used": l_rule_used,
                 "extreme_price": extreme_price,
                 "snr_low": snr_low,
                 "snr_high": snr_high,
@@ -542,10 +684,20 @@ class TrackedElement:
 
         l_price = cls._safe_optional_float(raw.get("l_price"))
         l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
+        l_price_bearish = cls._safe_optional_float(raw.get("l_price_bearish"))
+        l_alt_bearish = cls._safe_optional_float(raw.get("l_alt_bearish"))
+        l_price_bullish = cls._safe_optional_float(raw.get("l_price_bullish"))
+        l_alt_bullish = cls._safe_optional_float(raw.get("l_alt_bullish"))
+        l_price_used = cls._safe_optional_float(
+            raw.get("l_price_used") or raw.get("line_used")
+        )
+        l_rule_used = str(raw.get("l_rule_used") or raw.get("line_rule_used") or "")
         extreme_price = cls._safe_optional_float(raw.get("extreme_price"))
         rb_low = cls._safe_optional_float(raw.get("rb_low"))
         rb_high = cls._safe_optional_float(raw.get("rb_high"))
 
+        if l_price is None:
+            l_price = l_price_used
         if l_price is None and rb_type == "low" and rb_high is not None:
             l_price = rb_high
         if l_price is None and rb_low is not None:
@@ -558,6 +710,18 @@ class TrackedElement:
             return None
         if l_alt_price is None:
             l_alt_price = l_price
+        if l_price_bearish is None:
+            l_price_bearish = l_price
+        if l_alt_bearish is None:
+            l_alt_bearish = l_alt_price
+        if l_price_bullish is None:
+            l_price_bullish = l_price
+        if l_alt_bullish is None:
+            l_alt_bullish = l_alt_price
+        if l_price_used is None:
+            l_price_used = l_price
+        if not l_rule_used:
+            l_rule_used = "bullish_C2close" if rb_type == "low" else "bearish_C1close"
 
         if rb_low is None:
             rb_low = min(l_price, extreme_price)
@@ -584,6 +748,14 @@ class TrackedElement:
                 "c3_time": datetime_to_iso(c3_time),
                 "l_price": float(l_price),
                 "l_alt_price": float(l_alt_price),
+                "l_price_bearish": float(l_price_bearish),
+                "l_alt_bearish": float(l_alt_bearish),
+                "l_price_bullish": float(l_price_bullish),
+                "l_alt_bullish": float(l_alt_bullish),
+                "l_price_used": float(l_price_used),
+                "l_rule_used": l_rule_used,
+                "line_used": float(l_price_used),
+                "line_rule_used": l_rule_used,
                 "extreme_price": float(extreme_price),
                 "rb_low": float(rb_low),
                 "rb_high": float(rb_high),
