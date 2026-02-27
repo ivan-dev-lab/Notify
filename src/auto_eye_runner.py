@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import logging
@@ -10,6 +10,7 @@ from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.detectors.registry import build_detectors
 from auto_eye.state_snapshot import StateSnapshotBuilder
 from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
+from auto_eye.trend_service import TrendSnapshotBuilder
 from config_loader import load_config
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,20 @@ def merge_state_summary(
     merged["state_files_updated"] = state_files_updated
     merged["state_files_unchanged"] = state_files_unchanged
     merged["state_errors"] = state_errors
+    return merged
+
+
+def merge_trend_summary(
+    payload: dict[str, object],
+    *,
+    trend_files_updated: int,
+    trend_files_unchanged: int,
+    trend_errors: list[str],
+) -> dict[str, object]:
+    merged = dict(payload)
+    merged["trend_files_updated"] = trend_files_updated
+    merged["trend_files_unchanged"] = trend_files_unchanged
+    merged["trend_errors"] = trend_errors
     return merged
 
 
@@ -102,12 +117,22 @@ def run_once(config_path: Path, *, force_full_scan: bool = False) -> dict[str, o
         state_errors=state_report.errors,
     )
 
+    trend_builder = TrendSnapshotBuilder(config=config)
+    trend_report = trend_builder.build_all(force_write=False)
+    payload = merge_trend_summary(
+        payload,
+        trend_files_updated=trend_report.files_updated,
+        trend_files_unchanged=trend_report.files_unchanged,
+        trend_errors=trend_report.errors,
+    )
+
     logger.info(
-        "Auto-eye run completed: detectors=%s processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
+        "Auto-eye run completed: detectors=%s processed=%s updated_files=%s state_updated=%s trend_updated=%s new=%s status_updates=%s",
         ",".join(payload["detectors_processed"]),
         payload["timeframes_processed"],
         payload["files_updated"],
         payload["state_files_updated"],
+        payload["trend_files_updated"],
         payload["new_elements"],
         payload["status_updates"],
     )
@@ -146,11 +171,14 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
             summary = summarize_reports(initial_reports)
             state_builder = StateSnapshotBuilder(config=config)
             state_report = state_builder.build_all(force_write=False)
+            trend_builder = TrendSnapshotBuilder(config=config)
+            trend_report = trend_builder.build_all(force_write=False)
             logger.info(
-                "Initial full scan done: processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
+                "Initial full scan done: processed=%s updated_files=%s state_updated=%s trend_updated=%s new=%s status_updates=%s",
                 summary["timeframes_processed"],
                 summary["files_updated"],
                 state_report.files_updated,
+                trend_report.files_updated,
                 summary["new_elements"],
                 summary["status_updates"],
             )
@@ -166,11 +194,14 @@ def run_loop(config_path: Path, *, force_full_scan: bool = False) -> None:
                 summary = summarize_reports(reports)
                 state_builder = StateSnapshotBuilder(config=config)
                 state_report = state_builder.build_all(force_write=False)
+                trend_builder = TrendSnapshotBuilder(config=config)
+                trend_report = trend_builder.build_all(force_write=False)
                 logger.info(
-                    "Scheduler cycle: processed=%s updated_files=%s state_updated=%s new=%s status_updates=%s",
+                    "Scheduler cycle: processed=%s updated_files=%s state_updated=%s trend_updated=%s new=%s status_updates=%s",
                     summary["timeframes_processed"],
                     summary["files_updated"],
                     state_report.files_updated,
+                    trend_report.files_updated,
                     summary["new_elements"],
                     summary["status_updates"],
                 )

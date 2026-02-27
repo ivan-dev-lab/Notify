@@ -82,6 +82,7 @@ def ensure_exchange_structure(base_json_path: Path) -> dict[str, Path]:
         "state": exchange_dir / "State",
         "actions": exchange_dir / "Actions",
         "decisions": exchange_dir / "Decisions",
+        "trends": exchange_dir / "Trends",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -93,9 +94,13 @@ def state_json_path(base_json_path: Path, asset: str) -> Path:
     return dirs["state"] / f"{sanitize_asset_filename(asset)}.json"
 
 
+def trend_json_path(base_json_path: Path, asset: str) -> Path:
+    dirs = ensure_exchange_structure(base_json_path)
+    return dirs["trends"] / f"{sanitize_asset_filename(asset)}.json"
+
+
 def export_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
     logger.info("AutoEye JSON exported: %s", path)
-

@@ -1,4 +1,4 @@
-from auto_eye.engine import AutoEyeEngine
+﻿from auto_eye.engine import AutoEyeEngine
 from auto_eye.models import (
     AutoEyeState,
     OHLCBar,
@@ -14,6 +14,7 @@ from auto_eye.models import (
 )
 from auto_eye.state_snapshot import StateSnapshotBuilder, StateSnapshotReport
 from auto_eye.timeframe_service import TimeframeUpdateReport, TimeframeUpdateService
+from auto_eye.trend_service import TrendSnapshotBuilder, TrendSnapshotReport
 
 __all__ = [
     "AutoEyeEngine",
@@ -21,6 +22,8 @@ __all__ = [
     "TimeframeUpdateReport",
     "StateSnapshotBuilder",
     "StateSnapshotReport",
+    "TrendSnapshotBuilder",
+    "TrendSnapshotReport",
     "AutoEyeState",
     "OHLCBar",
     "TrackedElement",
