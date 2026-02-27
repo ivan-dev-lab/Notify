@@ -9,3 +9,4 @@ dist/
 *.yaml
 *.json
 *.csv
+output/
