@@ -10,6 +10,8 @@ from auto_eye.detectors.base import MarketElementDetector
 from auto_eye.exporters import resolve_output_path, resolve_storage_element_name
 from auto_eye.models import (
     STATUS_ACTIVE,
+    STATUS_BROKEN,
+    STATUS_EXPIRED,
     STATUS_INVALIDATED,
     STATUS_MITIGATED_FULL,
     TrackedElement,
@@ -369,7 +371,12 @@ class TimeframeUpdateService:
 
     @staticmethod
     def _is_actual_element(element: TrackedElement) -> bool:
-        return element.status not in {STATUS_INVALIDATED, STATUS_MITIGATED_FULL}
+        return element.status not in {
+            STATUS_INVALIDATED,
+            STATUS_MITIGATED_FULL,
+            STATUS_BROKEN,
+            STATUS_EXPIRED,
+        }
 
     @staticmethod
     def _build_symbol_key(timeframe: str, symbol: str) -> str:

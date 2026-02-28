@@ -2,11 +2,19 @@
 
 import hashlib
 from collections.abc import Sequence
+from datetime import datetime
 
 from config_loader import AutoEyeConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.models import OHLCBar, TrackedElement
+from auto_eye.models import (
+    OHLCBar,
+    STATUS_ACTIVE,
+    STATUS_BROKEN,
+    TrackedElement,
+    datetime_from_iso,
+    datetime_to_iso,
+)
 
 FRACTAL_HIGH = "high"
 FRACTAL_LOW = "low"
@@ -71,8 +79,54 @@ class FractalDetector(MarketElementDetector):
         bars: Sequence[OHLCBar],
         config: AutoEyeConfig,
     ) -> TrackedElement:
-        del bars
         del config
+        if len(bars) == 0:
+            return element
+
+        fractal_type = str(
+            element.metadata.get("fractal_type") or element.direction or ""
+        ).strip().lower()
+        if fractal_type not in {FRACTAL_HIGH, FRACTAL_LOW}:
+            return element
+
+        extreme_price = self._metadata_float(
+            element.metadata.get("extreme_price"),
+            fallback=(
+                element.zone_high
+                if fractal_type == FRACTAL_HIGH
+                else element.zone_low
+            ),
+        )
+        confirm_time = self._metadata_time(
+            element.metadata.get("confirm_time"),
+            fallback=element.c3_time,
+        )
+        broken_time = self._metadata_time_or_none(element.metadata.get("broken_time"))
+        broken_side = str(element.metadata.get("broken_side") or "").strip().lower()
+        status = str(element.status or STATUS_ACTIVE).strip().lower() or STATUS_ACTIVE
+
+        for bar in bars:
+            if bar.time <= confirm_time:
+                continue
+            if status == STATUS_BROKEN:
+                break
+
+            if fractal_type == FRACTAL_HIGH and bar.high > extreme_price:
+                status = STATUS_BROKEN
+                broken_time = bar.time
+                broken_side = "up"
+                break
+
+            if fractal_type == FRACTAL_LOW and bar.low < extreme_price:
+                status = STATUS_BROKEN
+                broken_time = bar.time
+                broken_side = "down"
+                break
+
+        element.status = status
+        element.mitigated_time = broken_time if status == STATUS_BROKEN else None
+        element.metadata["broken_time"] = datetime_to_iso(broken_time)
+        element.metadata["broken_side"] = broken_side or None
         return element
 
     def _build_element(
@@ -133,6 +187,8 @@ class FractalDetector(MarketElementDetector):
                 "l_alt_bearish": l_alt_bearish,
                 "l_price_bullish": l_price_bullish,
                 "l_alt_bullish": l_alt_bullish,
+                "broken_time": None,
+                "broken_side": None,
             },
         )
 
@@ -151,3 +207,25 @@ class FractalDetector(MarketElementDetector):
             f"{extreme_price:.10f}|{l_price:.10f}"
         )
         return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20]
+
+    @staticmethod
+    def _metadata_float(value: object, *, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+
+    @staticmethod
+    def _metadata_time(value: object, *, fallback: datetime) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        parsed = datetime_from_iso(str(value or ""))
+        if parsed is None:
+            return fallback
+        return parsed
+
+    @staticmethod
+    def _metadata_time_or_none(value: object) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        return datetime_from_iso(str(value or ""))

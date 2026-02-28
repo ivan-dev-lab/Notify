@@ -438,6 +438,9 @@ class TimeframeFileStore:
                 "l_alt_bearish": raw.get("l_alt_bearish"),
                 "l_price_bullish": raw.get("l_price_bullish"),
                 "l_alt_bullish": raw.get("l_alt_bullish"),
+                "status": raw.get("status"),
+                "broken_time_utc": raw.get("broken_time"),
+                "broken_side": raw.get("broken_side"),
                 "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
             }
         if element_type == "snr":
@@ -555,6 +558,9 @@ class TimeframeFileStore:
                 "l_alt_bearish": raw.get("l_alt_bearish"),
                 "l_price_bullish": raw.get("l_price_bullish"),
                 "l_alt_bullish": raw.get("l_alt_bullish"),
+                "status": raw.get("status"),
+                "broken_time": raw.get("broken_time_utc") or raw.get("broken_time"),
+                "broken_side": raw.get("broken_side"),
                 "metadata": raw.get("metadata"),
             }
             return TrackedElement.from_dict(converted)

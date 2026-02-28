@@ -149,6 +149,11 @@ class TrackedElement:
             self.metadata.get("l_alt_bullish"),
             fallback=l_price_bullish,
         )
+        broken_time = datetime_from_iso(str(self.metadata.get("broken_time") or ""))
+        if broken_time is None:
+            broken_time = self.mitigated_time
+        broken_side_raw = self.metadata.get("broken_side")
+        broken_side = None if broken_side_raw is None else str(broken_side_raw)
         return {
             "id": self.id,
             "element_type": "fractal",
@@ -167,6 +172,9 @@ class TrackedElement:
             "l_alt_bearish": l_alt_bearish,
             "l_price_bullish": l_price_bullish,
             "l_alt_bullish": l_alt_bullish,
+            "status": self.status,
+            "broken_time": datetime_to_iso(broken_time),
+            "broken_side": broken_side,
             "metadata": self.metadata,
         }
 
@@ -485,6 +493,10 @@ class TrackedElement:
         if l_alt_bullish is None:
             l_alt_bullish = l_price_bullish
 
+        broken_time = datetime_from_iso(str(raw.get("broken_time") or ""))
+        broken_side_raw = raw.get("broken_side")
+        broken_side = None if broken_side_raw is None else str(broken_side_raw)
+
         zone_low = min(l_price, extreme_price)
         zone_high = max(l_price, extreme_price)
         zone_size = max(0.0, zone_high - zone_low)
@@ -505,6 +517,8 @@ class TrackedElement:
                 "l_alt_bearish": l_alt_bearish,
                 "l_price_bullish": l_price_bullish,
                 "l_alt_bullish": l_alt_bullish,
+                "broken_time": datetime_to_iso(broken_time),
+                "broken_side": broken_side,
             }
         )
 
@@ -523,7 +537,7 @@ class TrackedElement:
             c3_time=c3_time,
             status=str(raw.get("status", STATUS_ACTIVE)),
             touched_time=None,
-            mitigated_time=None,
+            mitigated_time=broken_time,
             fill_price=None,
             fill_percent=None,
             metadata=metadata,

@@ -83,6 +83,9 @@ def ensure_exchange_structure(base_json_path: Path) -> dict[str, Path]:
         "actions": exchange_dir / "Actions",
         "decisions": exchange_dir / "Decisions",
         "trends": exchange_dir / "Trends",
+        "scenarios": exchange_dir / "Scenarios",
+        "interactions": exchange_dir / "Interactions",
+        "backtests": exchange_dir / "Backtests",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -97,6 +100,16 @@ def state_json_path(base_json_path: Path, asset: str) -> Path:
 def trend_json_path(base_json_path: Path, asset: str) -> Path:
     dirs = ensure_exchange_structure(base_json_path)
     return dirs["trends"] / f"{sanitize_asset_filename(asset)}.json"
+
+
+def scenario_json_path(base_json_path: Path, asset: str) -> Path:
+    dirs = ensure_exchange_structure(base_json_path)
+    return dirs["scenarios"] / f"{sanitize_asset_filename(asset)}.json"
+
+
+def interaction_jsonl_path(base_json_path: Path, asset: str) -> Path:
+    dirs = ensure_exchange_structure(base_json_path)
+    return dirs["interactions"] / f"{sanitize_asset_filename(asset)}.jsonl"
 
 
 def export_json(path: Path, payload: dict[str, object]) -> None:

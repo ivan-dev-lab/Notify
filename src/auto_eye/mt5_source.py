@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -133,6 +133,39 @@ class MT5BarsSource:
                 error_message,
             )
             return None
+        return self._parse_rates(raw_rates)
+
+    def fetch_range(
+        self,
+        *,
+        symbol: str,
+        timeframe_code: str,
+        start_time_utc: datetime,
+        end_time_utc: datetime,
+    ) -> list[OHLCBar] | None:
+        self._ensure_connected()
+        assert mt5 is not None
+
+        timeframe_value = resolve_mt5_timeframe(mt5, timeframe_code)
+        self._ensure_symbol_selected(symbol)
+
+        from_utc = start_time_utc.astimezone(timezone.utc).replace(microsecond=0)
+        to_utc = end_time_utc.astimezone(timezone.utc).replace(microsecond=0)
+        if to_utc <= from_utc:
+            return []
+
+        raw_rates = mt5.copy_rates_range(symbol, timeframe_value, from_utc, to_utc)
+        if raw_rates is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "backtest copy_rates_range returned None for %s %s: %s %s",
+                symbol,
+                timeframe_code,
+                error_code,
+                error_message,
+            )
+            return None
+
         return self._parse_rates(raw_rates)
 
     def fetch_incremental(

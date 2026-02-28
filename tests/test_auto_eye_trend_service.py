@@ -18,6 +18,8 @@ from config_loader import (  # noqa: E402
     LoggingConfig,
     MetaTraderConfig,
     ScraperConfig,
+    AutoEyeNotificationsConfig,
+    TelegramBacktestConfig,
     TelegramConfig,
 )
 
@@ -51,6 +53,20 @@ def build_config(output_root: Path) -> AppConfig:
             check_interval_seconds=10,
             alerts_json=str(output_root / "alerts.json"),
             allowed_user_ids=[],
+            auto_eye_notifications=AutoEyeNotificationsConfig(
+                enabled=False,
+                timeframes=[],
+                elements=[],
+                state_dir="",
+                seen_ids_json=str(output_root / "auto_eye_notified_elements.json"),
+            ),
+            backtest=TelegramBacktestConfig(
+                enabled=False,
+                allowed_user_ids=[],
+                max_interval_hours=24,
+                warmup_bars=100,
+                max_proposals_to_send=5,
+            ),
         ),
         logging=LoggingConfig(
             level="INFO",
@@ -321,3 +337,4 @@ class TrendSnapshotBuilderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

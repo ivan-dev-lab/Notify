@@ -32,11 +32,31 @@ class MetaTraderConfig:
 
 
 @dataclass
+class AutoEyeNotificationsConfig:
+    enabled: bool
+    timeframes: list[str]
+    elements: list[str]
+    state_dir: str
+    seen_ids_json: str
+
+
+@dataclass
+class TelegramBacktestConfig:
+    enabled: bool
+    allowed_user_ids: list[int]
+    max_interval_hours: int
+    warmup_bars: int
+    max_proposals_to_send: int
+
+
+@dataclass
 class TelegramConfig:
     bot_token: str
     check_interval_seconds: int
     alerts_json: str
     allowed_user_ids: list[int]
+    auto_eye_notifications: AutoEyeNotificationsConfig
+    backtest: TelegramBacktestConfig
 
 
 @dataclass
@@ -80,6 +100,46 @@ class AppConfig:
     telegram: TelegramConfig
     logging: LoggingConfig
     auto_eye: AutoEyeConfig
+
+
+def _parse_user_ids(raw_value: object) -> list[int]:
+    values: list[int] = []
+    candidates: list[object] = []
+
+    if isinstance(raw_value, list):
+        candidates.extend(raw_value)
+    elif isinstance(raw_value, str):
+        candidates.extend(part.strip() for part in raw_value.split(","))
+
+    for candidate in candidates:
+        text_value = str(candidate).strip()
+        if not text_value:
+            continue
+        try:
+            parsed = int(text_value)
+        except ValueError:
+            continue
+        if parsed not in values:
+            values.append(parsed)
+
+    return values
+
+
+def _normalize_notification_timeframe(value: str) -> str:
+    normalized = str(value).strip().upper()
+    if normalized == "M1":
+        # Monthly TF in this project is stored as MN1 in State snapshots.
+        return "MN1"
+    return normalized
+
+
+def _normalize_notification_element(value: str) -> str:
+    normalized = str(value).strip().lower()
+    if normalized in {"fractal", "fractals"}:
+        return "fractal"
+    if normalized in {"fvg", "snr", "rb"}:
+        return normalized
+    return ""
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -128,29 +188,28 @@ def load_config(config_path: Path) -> AppConfig:
     if not bot_token:
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
-    allowed_user_ids: list[int] = []
-    raw_allowed = telegram.get("allowed_user_ids", [])
-    allowed_candidates: list[object] = []
-
-    if isinstance(raw_allowed, list):
-        allowed_candidates.extend(raw_allowed)
-    elif isinstance(raw_allowed, str):
-        allowed_candidates.extend(part.strip() for part in raw_allowed.split(","))
-
-    env_allowed = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
-    if env_allowed:
-        allowed_candidates.extend(part.strip() for part in env_allowed.split(","))
-
-    for candidate in allowed_candidates:
-        text_value = str(candidate).strip()
-        if not text_value:
-            continue
-        try:
-            user_id = int(text_value)
-        except ValueError:
-            continue
+    allowed_user_ids: list[int] = _parse_user_ids(telegram.get("allowed_user_ids", []))
+    env_allowed = _parse_user_ids(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip())
+    for user_id in env_allowed:
         if user_id not in allowed_user_ids:
             allowed_user_ids.append(user_id)
+
+    backtest_raw = telegram.get("backtest", {})
+    if not isinstance(backtest_raw, dict):
+        backtest_raw = {}
+
+    backtest_allowed_user_ids: list[int] = _parse_user_ids(
+        backtest_raw.get("allowed_user_ids", [])
+    )
+    env_backtest_allowed = _parse_user_ids(
+        os.getenv("TELEGRAM_BACKTEST_USER_IDS", "").strip()
+    )
+    for user_id in env_backtest_allowed:
+        if user_id not in backtest_allowed_user_ids:
+            backtest_allowed_user_ids.append(user_id)
+
+    if not backtest_allowed_user_ids:
+        backtest_allowed_user_ids = list(allowed_user_ids)
 
     auto_eye_symbols: list[str] = []
     auto_eye_raw_symbols = auto_eye_raw.get("symbols", [])
@@ -181,6 +240,41 @@ def load_config(config_path: Path) -> AppConfig:
                 auto_eye_elements.append(normalized_element)
     if not auto_eye_elements:
         auto_eye_elements = ["fvg"]
+
+    auto_eye_notification_raw = telegram.get("auto_eye_notifications", {})
+    if not isinstance(auto_eye_notification_raw, dict):
+        auto_eye_notification_raw = {}
+
+    notification_timeframes: list[str] = []
+    raw_notification_timeframes = auto_eye_notification_raw.get("timeframes", [])
+    if isinstance(raw_notification_timeframes, list):
+        for timeframe in raw_notification_timeframes:
+            normalized_timeframe = _normalize_notification_timeframe(str(timeframe))
+            if normalized_timeframe and normalized_timeframe not in notification_timeframes:
+                notification_timeframes.append(normalized_timeframe)
+
+    if not notification_timeframes:
+        for timeframe in auto_eye_timeframes:
+            normalized_timeframe = _normalize_notification_timeframe(timeframe)
+            if normalized_timeframe and normalized_timeframe not in notification_timeframes:
+                notification_timeframes.append(normalized_timeframe)
+
+    notification_elements: list[str] = []
+    raw_notification_elements = auto_eye_notification_raw.get("elements", [])
+    if isinstance(raw_notification_elements, list):
+        for element in raw_notification_elements:
+            normalized_element = _normalize_notification_element(str(element))
+            if normalized_element and normalized_element not in notification_elements:
+                notification_elements.append(normalized_element)
+
+    if not notification_elements:
+        for element in auto_eye_elements:
+            normalized_element = _normalize_notification_element(element)
+            if normalized_element and normalized_element not in notification_elements:
+                notification_elements.append(normalized_element)
+
+    if not notification_elements:
+        notification_elements = ["fvg"]
 
     fill_rule = str(auto_eye_raw.get("fill_rule", "both")).strip().lower()
     if fill_rule not in {"touch", "full", "both"}:
@@ -217,6 +311,25 @@ def load_config(config_path: Path) -> AppConfig:
             check_interval_seconds=int(telegram.get("check_interval_seconds", 300)),
             alerts_json=str(telegram.get("alerts_json", "output/alerts.json")),
             allowed_user_ids=allowed_user_ids,
+            auto_eye_notifications=AutoEyeNotificationsConfig(
+                enabled=bool(auto_eye_notification_raw.get("enabled", True)),
+                timeframes=notification_timeframes,
+                elements=notification_elements,
+                state_dir=str(auto_eye_notification_raw.get("state_dir", "")).strip(),
+                seen_ids_json=str(
+                    auto_eye_notification_raw.get(
+                        "seen_ids_json",
+                        "output/auto_eye_notified_elements.json",
+                    )
+                ).strip(),
+            ),
+            backtest=TelegramBacktestConfig(
+                enabled=bool(backtest_raw.get("enabled", True)),
+                allowed_user_ids=backtest_allowed_user_ids,
+                max_interval_hours=max(1, int(backtest_raw.get("max_interval_hours", 168))),
+                warmup_bars=max(50, int(backtest_raw.get("warmup_bars", 500))),
+                max_proposals_to_send=max(1, int(backtest_raw.get("max_proposals_to_send", 30))),
+            ),
         ),
         logging=LoggingConfig(
             level=str(logging_raw.get("level", "INFO")),
@@ -253,3 +366,5 @@ def load_config(config_path: Path) -> AppConfig:
             ),
         ),
     )
+
+

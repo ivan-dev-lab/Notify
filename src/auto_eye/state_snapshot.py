@@ -10,7 +10,12 @@ from pathlib import Path
 from config_loader import AppConfig
 
 from auto_eye.exporters import ensure_exchange_structure, resolve_output_path, state_json_path
-from auto_eye.models import STATUS_INVALIDATED, STATUS_MITIGATED_FULL
+from auto_eye.models import (
+    STATUS_BROKEN,
+    STATUS_EXPIRED,
+    STATUS_INVALIDATED,
+    STATUS_MITIGATED_FULL,
+)
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.timeframe_files import REQUIRED_STATE_TIMEFRAMES, STATE_SCHEMA_VERSION
 
@@ -168,7 +173,12 @@ class StateSnapshotBuilder:
         status = str(item.get("status") or "").strip().lower()
         if not status:
             return True
-        return status not in {STATUS_INVALIDATED, STATUS_MITIGATED_FULL}
+        return status not in {
+            STATUS_INVALIDATED,
+            STATUS_MITIGATED_FULL,
+            STATUS_BROKEN,
+            STATUS_EXPIRED,
+        }
 
     @staticmethod
     def _normalize_state_block(raw_state: object) -> dict[str, object]:

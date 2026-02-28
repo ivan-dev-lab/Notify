@@ -16,11 +16,12 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 import yaml
 
 from app_logging import configure_logging
+from auto_eye.exporters import ensure_exchange_structure
 from config_loader import AppConfig, load_config
 from main import QuotesMap, collect_quotes, resolve_output_path, save_quotes
 
@@ -28,8 +29,10 @@ CALLBACK_REFRESH = "refresh"
 CALLBACK_MENU_ALERTS = "menu_alerts"
 CALLBACK_MENU_HOME = "menu_home"
 CALLBACK_MENU_DELETE = "menu_delete"
+CALLBACK_MENU_BACKTEST = "menu_backtest"
 CALLBACK_CANCEL = "cancel"
 CALLBACK_NOOP = "noop"
+CALLBACK_BACKTEST_CANCEL = "bt_cancel"
 
 CALLBACK_ALERT_ASSET_PREFIX = "alerts_asset|"
 CALLBACK_PRICE_SET_PREFIX = "price_set|"
@@ -55,6 +58,10 @@ CALLBACK_EDIT_CHANGE_PREFIX = "edit_change|"
 CALLBACK_EDIT_SET_DIR_PREFIX = "edit_set_dir|"
 CALLBACK_EDIT_SET_TF_PREFIX = "edit_set_tf|"
 CALLBACK_EDIT_BACK = "edit_back"
+CALLBACK_BACKTEST_ASSET_PREFIX = "bt_asset|"
+CALLBACK_BACKTEST_RANGE_PREFIX = "bt_range|"
+CALLBACK_BACKTEST_CUSTOM_PREFIX = "bt_custom|"
+CALLBACK_BACKTEST_BACK_PREFIX = "bt_back|"
 
 ALERT_KIND_PRICE = "price"
 ALERT_KIND_TIME = "time"
@@ -98,6 +105,7 @@ FULL_DATETIME_PATTERN = re.compile(
 DMY_DATETIME_PATTERN = re.compile(
     r"^\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*$"
 )
+BACKTEST_INTERVAL_PATTERN = re.compile(r"^\s*(.+?)\s+[-–—]\s+(.+?)\s*$")
 
 PREFERRED_GROUP_ORDER = [
     "INDICES",
@@ -109,6 +117,28 @@ PREFERRED_GROUP_ORDER = [
 ]
 
 TIMEFRAME_RULES_PATH = Path("config/timeframe_rules.yaml")
+
+AUTO_EYE_ELEMENT_KEY_MAP = {
+    "fvg": "fvg",
+    "snr": "snr",
+    "fractal": "fractals",
+    "fractals": "fractals",
+    "rb": "rb",
+}
+AUTO_EYE_ELEMENT_LABELS = {
+    "fvg": "FVG",
+    "snr": "SNR",
+    "fractals": "Fractal",
+    "rb": "RB",
+}
+AUTO_EYE_FORMATION_TIME_KEYS = (
+    "formation_time_utc",
+    "formation_time",
+    "break_time",
+    "confirm_time",
+    "c3_time_utc",
+    "c3_time",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +180,20 @@ class AssetDeleteSelectionState:
 
 
 @dataclass
+class AutoEyeElementEvent:
+    dedupe_key: str
+    symbol: str
+    timeframe: str
+    element_key: str
+    element_id: str
+    direction: str
+    status: str
+    formation_time_utc: str | None
+    zone_low: float | None
+    zone_high: float | None
+
+
+@dataclass
 class BotState:
     config: AppConfig
     alert_store: "AlertStore"
@@ -160,7 +204,71 @@ class BotState:
     alert_edit_sessions: dict[int, dict[str, object]]
     last_quotes: QuotesMap
     dashboard_message_ids: dict[int, tuple[int, int]]
+    auto_eye_state_dir: Path
+    auto_eye_seen_store: "AutoEyeSeenStore"
+    backtest_tasks: dict[int, asyncio.Task]
     periodic_task: asyncio.Task | None = None
+
+
+class AutoEyeSeenStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.initialized = False
+        self.seen_ids: set[str] = set()
+        self.load()
+
+    def load(self) -> None:
+        if not self.path.exists():
+            logger.info("Auto-eye notify store not found, starting empty: %s", self.path)
+            return
+
+        with self.path.open("r", encoding="utf-8") as file:
+            raw = json.load(file)
+
+        self.initialized = bool(raw.get("initialized", False))
+        raw_seen = raw.get("seen_ids", [])
+        if isinstance(raw_seen, list):
+            self.seen_ids = {
+                str(item).strip() for item in raw_seen if str(item).strip()
+            }
+        else:
+            self.seen_ids = set()
+
+        logger.info(
+            "Loaded auto-eye notify store: initialized=%s seen=%s path=%s",
+            self.initialized,
+            len(self.seen_ids),
+            self.path,
+        )
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "initialized": self.initialized,
+            "seen_ids": sorted(self.seen_ids),
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+
+    def register_snapshot(self, current_keys: set[str]) -> set[str]:
+        normalized = {key.strip() for key in current_keys if key.strip()}
+
+        if not self.initialized:
+            self.initialized = True
+            self.seen_ids = set(normalized)
+            self.save()
+            logger.info(
+                "Auto-eye notify store initialized with %s keys", len(self.seen_ids)
+            )
+            return set()
+
+        new_keys = normalized - self.seen_ids
+        if new_keys:
+            self.seen_ids.update(new_keys)
+            self.save()
+
+        return new_keys
 
 
 class AlertStore:
@@ -771,6 +879,304 @@ class AlertStore:
             logger.info("Triggered %s alerts", len(triggered))
         return triggered
 
+
+def normalize_auto_eye_timeframe(value: str) -> str:
+    normalized = str(value).strip().upper()
+    if normalized == "M1":
+        return "MN1"
+    return normalized
+
+
+def normalize_auto_eye_element_key(value: str) -> str | None:
+    normalized = str(value).strip().lower()
+    return AUTO_EYE_ELEMENT_KEY_MAP.get(normalized)
+
+
+def resolve_auto_eye_state_dir(config: AppConfig) -> Path:
+    custom_state_dir = str(config.telegram.auto_eye_notifications.state_dir).strip()
+    if custom_state_dir:
+        path = Path(custom_state_dir)
+        if path.is_absolute():
+            return path
+        return Path.cwd() / path
+
+    auto_eye_output_path = resolve_output_path(config.auto_eye.output_json)
+    return ensure_exchange_structure(auto_eye_output_path)["state"]
+
+
+def parse_auto_eye_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, str):
+        normalized = value.strip().replace(",", ".")
+        if not normalized:
+            return None
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+
+    return None
+
+
+def parse_auto_eye_zone(
+    raw_item: dict[str, object],
+    element_key: str,
+) -> tuple[float | None, float | None]:
+    if element_key == "fvg":
+        return (
+            parse_auto_eye_float(raw_item.get("fvg_low")),
+            parse_auto_eye_float(raw_item.get("fvg_high")),
+        )
+
+    if element_key == "snr":
+        return (
+            parse_auto_eye_float(raw_item.get("snr_low")),
+            parse_auto_eye_float(raw_item.get("snr_high")),
+        )
+
+    if element_key == "rb":
+        return (
+            parse_auto_eye_float(raw_item.get("rb_low")),
+            parse_auto_eye_float(raw_item.get("rb_high")),
+        )
+
+    if element_key == "fractals":
+        extreme = parse_auto_eye_float(raw_item.get("extreme_price"))
+        return extreme, extreme
+
+    return (
+        parse_auto_eye_float(raw_item.get("zone_low")),
+        parse_auto_eye_float(raw_item.get("zone_high")),
+    )
+
+
+def parse_auto_eye_event(
+    *,
+    symbol: str,
+    timeframe: str,
+    element_key: str,
+    raw_item: dict[str, object],
+) -> AutoEyeElementEvent | None:
+    element_id = str(raw_item.get("id") or "").strip()
+    if not element_id:
+        return None
+
+    direction = str(
+        raw_item.get("direction")
+        or raw_item.get("role")
+        or raw_item.get("fractal_type")
+        or raw_item.get("rb_type")
+        or ""
+    ).strip().lower()
+    status = str(raw_item.get("status") or "active").strip().lower()
+
+    formation_time_utc: str | None = None
+    for key in AUTO_EYE_FORMATION_TIME_KEYS:
+        value = str(raw_item.get(key) or "").strip()
+        if value:
+            formation_time_utc = value
+            break
+
+    zone_low, zone_high = parse_auto_eye_zone(raw_item, element_key)
+    dedupe_key = f"{symbol}|{timeframe}|{element_key}|{element_id}"
+
+    return AutoEyeElementEvent(
+        dedupe_key=dedupe_key,
+        symbol=symbol,
+        timeframe=timeframe,
+        element_key=element_key,
+        element_id=element_id,
+        direction=direction,
+        status=status,
+        formation_time_utc=formation_time_utc,
+        zone_low=zone_low,
+        zone_high=zone_high,
+    )
+
+
+def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
+    config = state.config.telegram.auto_eye_notifications
+    if not config.enabled:
+        return []
+
+    if not state.auto_eye_state_dir.exists():
+        logger.debug("Auto-eye state dir is missing: %s", state.auto_eye_state_dir)
+        return []
+
+    configured_timeframes: list[str] = []
+    for raw_timeframe in config.timeframes:
+        normalized = normalize_auto_eye_timeframe(raw_timeframe)
+        if normalized and normalized not in configured_timeframes:
+            configured_timeframes.append(normalized)
+    if not configured_timeframes:
+        return []
+
+    configured_elements: list[str] = []
+    for raw_element in config.elements:
+        normalized_element = normalize_auto_eye_element_key(raw_element)
+        if normalized_element and normalized_element not in configured_elements:
+            configured_elements.append(normalized_element)
+    if not configured_elements:
+        return []
+
+    events_by_key: dict[str, AutoEyeElementEvent] = {}
+
+    for state_file in sorted(state.auto_eye_state_dir.glob("*.json")):
+        if state_file.name.lower() == "schema_version.json":
+            continue
+
+        try:
+            with state_file.open("r", encoding="utf-8") as file:
+                raw_payload = json.load(file)
+        except Exception as error:
+            logger.warning("Failed to read auto-eye state file %s: %s", state_file, error)
+            continue
+
+        if not isinstance(raw_payload, dict):
+            continue
+
+        symbol = str(raw_payload.get("symbol") or state_file.stem).strip().upper()
+        raw_timeframes = raw_payload.get("timeframes")
+        if not isinstance(raw_timeframes, dict):
+            continue
+
+        for timeframe in configured_timeframes:
+            raw_timeframe = raw_timeframes.get(timeframe)
+            if not isinstance(raw_timeframe, dict):
+                continue
+
+            raw_elements_block = raw_timeframe.get("elements")
+            if not isinstance(raw_elements_block, dict):
+                continue
+
+            for element_key in configured_elements:
+                raw_items = raw_elements_block.get(element_key)
+                if element_key == "fractals" and not isinstance(raw_items, list):
+                    raw_items = raw_elements_block.get("fractal")
+                if not isinstance(raw_items, list):
+                    continue
+
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        continue
+
+                    event = parse_auto_eye_event(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        element_key=element_key,
+                        raw_item=raw_item,
+                    )
+                    if event is None:
+                        continue
+                    events_by_key[event.dedupe_key] = event
+
+    if not events_by_key:
+        return []
+
+    new_keys = state.auto_eye_seen_store.register_snapshot(set(events_by_key.keys()))
+    if not new_keys:
+        return []
+
+    new_events = [events_by_key[key] for key in new_keys if key in events_by_key]
+    new_events.sort(
+        key=lambda event: (
+            event.formation_time_utc or "",
+            event.symbol,
+            event.timeframe,
+            event.element_key,
+            event.element_id,
+        )
+    )
+    return new_events
+
+
+def auto_eye_direction_label(direction: str) -> str:
+    mapping = {
+        "bullish": "bullish",
+        "bearish": "bearish",
+        "high": "high",
+        "low": "low",
+        "support": "support",
+        "resistance": "resistance",
+    }
+    return mapping.get(direction.lower(), direction)
+
+
+def render_auto_eye_event_text(event: AutoEyeElementEvent) -> str:
+    element_label = AUTO_EYE_ELEMENT_LABELS.get(
+        event.element_key,
+        event.element_key.upper(),
+    )
+
+    lines = [
+        "<b>Новый элемент Auto-Eye</b>",
+        f"<b>Актив:</b> <code>{html.escape(event.symbol)}</code>",
+        f"<b>TF:</b> <b>{html.escape(event.timeframe)}</b>",
+        f"<b>Тип:</b> <b>{html.escape(element_label)}</b>",
+    ]
+
+    if event.direction:
+        lines.append(
+            f"<b>Направление:</b> <b>{html.escape(auto_eye_direction_label(event.direction))}</b>"
+        )
+
+    if event.zone_low is not None and event.zone_high is not None:
+        if abs(event.zone_low - event.zone_high) < 1e-12:
+            lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_low)}</b>")
+        else:
+            lines.append(
+                f"<b>Зона:</b> <b>{format_target(event.zone_low)} - {format_target(event.zone_high)}</b>"
+            )
+    elif event.zone_low is not None:
+        lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_low)}</b>")
+    elif event.zone_high is not None:
+        lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_high)}</b>")
+
+    if event.formation_time_utc:
+        lines.append(
+            "<b>Сформирован:</b> "
+            f"<b>{html.escape(format_local_datetime(event.formation_time_utc))}</b>"
+        )
+
+    lines.append(f"<b>ID:</b> <code>{html.escape(event.element_id)}</code>")
+    return "\n".join(lines)
+
+
+async def send_auto_eye_notifications(bot: Bot, state: BotState) -> int:
+    if not state.config.telegram.auto_eye_notifications.enabled:
+        return 0
+
+    new_events = await asyncio.to_thread(collect_new_auto_eye_events, state)
+    if not new_events:
+        return 0
+
+    recipients = list(state.config.telegram.allowed_user_ids)
+    sent_count = 0
+
+    for event in new_events:
+        text = render_auto_eye_event_text(event)
+        for user_id in recipients:
+            try:
+                await bot.send_message(chat_id=user_id, text=text)
+                sent_count += 1
+            except Exception:
+                logger.exception(
+                    "Failed to send auto-eye notification user_id=%s event=%s",
+                    user_id,
+                    event.dedupe_key,
+                )
+
+    logger.info(
+        "Auto-eye notifications sent: events=%s recipients=%s messages=%s",
+        len(new_events),
+        len(recipients),
+        sent_count,
+    )
+    return sent_count
+
+
 def direction_label(direction: str) -> str:
     if direction == DIRECTION_ABOVE:
         return "≥"
@@ -1353,11 +1759,24 @@ def load_cached_quotes(path: Path) -> QuotesMap:
     return {}
 
 
-def build_home_keyboard(has_alerts: bool) -> InlineKeyboardMarkup:
+def build_home_keyboard(
+    has_alerts: bool,
+    *,
+    has_backtest: bool,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="Обновить и проверить", callback_data=CALLBACK_REFRESH)],
         [InlineKeyboardButton(text="Меню алертов", callback_data=CALLBACK_MENU_ALERTS)],
     ]
+    if has_backtest:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Бектест сценариев",
+                    callback_data=CALLBACK_MENU_BACKTEST,
+                )
+            ]
+        )
     if has_alerts:
         rows.append([InlineKeyboardButton(text="Удалить алерт", callback_data=CALLBACK_MENU_DELETE)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1387,6 +1806,81 @@ def build_alerts_menu_keyboard(assets: list[str]) -> InlineKeyboardMarkup:
 
     rows.append([InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_HOME)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_backtest_assets_keyboard(assets: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    for group, group_assets in group_assets_for_ui(assets):
+        rows.append(
+            [InlineKeyboardButton(text=f"▾ {group} ▾", callback_data=CALLBACK_NOOP)]
+        )
+        group_row: list[InlineKeyboardButton] = []
+        for asset in group_assets:
+            group_row.append(
+                InlineKeyboardButton(
+                    text=asset,
+                    callback_data=f"{CALLBACK_BACKTEST_ASSET_PREFIX}{asset}",
+                )
+            )
+            if len(group_row) == 2:
+                rows.append(group_row)
+                group_row = []
+
+        if group_row:
+            rows.append(group_row)
+
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_HOME)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_backtest_period_keyboard(asset: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Последние 6 часов",
+                    callback_data=f"{CALLBACK_BACKTEST_RANGE_PREFIX}{asset}|6",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Последние 24 часа",
+                    callback_data=f"{CALLBACK_BACKTEST_RANGE_PREFIX}{asset}|24",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Последние 7 дней",
+                    callback_data=f"{CALLBACK_BACKTEST_RANGE_PREFIX}{asset}|168",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Свой интервал",
+                    callback_data=f"{CALLBACK_BACKTEST_CUSTOM_PREFIX}{asset}",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_BACKTEST),
+                InlineKeyboardButton(text="Отмена", callback_data=CALLBACK_BACKTEST_CANCEL),
+            ],
+        ]
+    )
+
+
+def build_backtest_input_keyboard(asset: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"{CALLBACK_BACKTEST_BACK_PREFIX}{asset}",
+                ),
+                InlineKeyboardButton(text="Отмена", callback_data=CALLBACK_BACKTEST_CANCEL),
+            ]
+        ]
+    )
 
 
 def build_asset_alert_keyboard(asset: str, asset_alerts: list[AlertRule]) -> InlineKeyboardMarkup:
@@ -1812,6 +2306,39 @@ def get_display_assets(config: AppConfig, quotes: QuotesMap) -> list[str]:
     extras = sorted(asset for asset in quotes.keys() if asset and asset not in known)
     assets.extend(extras)
     return assets
+
+
+def get_backtest_assets(config: AppConfig, quotes: QuotesMap) -> list[str]:
+    if config.auto_eye.symbols:
+        source = list(config.auto_eye.symbols)
+    else:
+        source = get_display_assets(config, quotes)
+
+    assets: list[str] = []
+    seen: set[str] = set()
+    for item in source:
+        asset = str(item).strip().upper()
+        if not asset or asset in seen:
+            continue
+        seen.add(asset)
+        assets.append(asset)
+    return assets
+
+
+def render_backtest_assets_menu_text() -> str:
+    return (
+        "<b>Бектест сценариев</b>\n\n"
+        "Выберите актив. После этого выберите период или задайте свой интервал."
+    )
+
+
+def render_backtest_period_menu_text(asset: str) -> str:
+    return (
+        f"<b>Бектест: {html.escape(asset)}</b>\n\n"
+        "Выберите период:\n"
+        "• быстрый диапазон, или\n"
+        "• свой интервал в формате <code>dd.mm.yyyy hh:mm - dd.mm.yyyy hh:mm</code>"
+    )
 
 
 def render_dashboard_text(config: AppConfig, quotes: QuotesMap) -> str:
@@ -2407,6 +2934,21 @@ def is_user_allowed(state: BotState, user_id: int) -> bool:
     return user_id in allowed
 
 
+def is_backtest_user_allowed(state: BotState, user_id: int) -> bool:
+    backtest_cfg = state.config.telegram.backtest
+    if not backtest_cfg.enabled:
+        return False
+
+    if not is_user_allowed(state, user_id):
+        return False
+
+    allowed = backtest_cfg.allowed_user_ids
+    if not allowed:
+        return False
+
+    return user_id in allowed
+
+
 async def ensure_message_allowed(state: BotState, message: Message) -> bool:
     user_id = message.from_user.id if message.from_user is not None else message.chat.id
     if is_user_allowed(state, user_id):
@@ -2543,6 +3085,285 @@ def parse_custom_time_to_utc(text: str) -> tuple[datetime, int] | None:
 
     return None
 
+
+def parse_local_datetime_input(text: str) -> datetime | None:
+    raw = text.strip()
+
+    dmy_match = DMY_DATETIME_PATTERN.fullmatch(raw)
+    if dmy_match:
+        day = int(dmy_match.group(1))
+        month = int(dmy_match.group(2))
+        year = int(dmy_match.group(3))
+        hour = int(dmy_match.group(4))
+        minute = int(dmy_match.group(5))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        with contextlib.suppress(ValueError):
+            return datetime(year, month, day, hour, minute, tzinfo=USER_TIMEZONE)
+        return None
+
+    full_match = FULL_DATETIME_PATTERN.fullmatch(raw)
+    if full_match:
+        year = int(full_match.group(1))
+        month = int(full_match.group(2))
+        day = int(full_match.group(3))
+        hour = int(full_match.group(4))
+        minute = int(full_match.group(5))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        with contextlib.suppress(ValueError):
+            return datetime(year, month, day, hour, minute, tzinfo=USER_TIMEZONE)
+        return None
+
+    return None
+
+
+def parse_backtest_interval_input(text: str) -> tuple[datetime, datetime] | None:
+    raw = text.strip()
+    match = BACKTEST_INTERVAL_PATTERN.fullmatch(raw)
+    if match is None:
+        return None
+
+    left_raw = str(match.group(1) or "").strip()
+    right_raw = str(match.group(2) or "").strip()
+    start_local = parse_local_datetime_input(left_raw)
+    end_local = parse_local_datetime_input(right_raw)
+    if start_local is None or end_local is None:
+        return None
+
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    if end_utc <= start_utc:
+        return None
+
+    return start_utc, end_utc
+
+
+def load_jsonl_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+
+    rows: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            payload = line.strip()
+            if not payload:
+                continue
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    rows.append(parsed)
+    return rows
+
+
+def run_backtest_for_asset_sync(
+    config: AppConfig,
+    *,
+    asset: str,
+    start_utc: datetime,
+    end_utc: datetime,
+    warmup_bars: int,
+) -> tuple[object, list[dict[str, object]]]:
+    from auto_eye.backtest_service import BacktestScenarioRunner
+    from auto_eye.detectors.registry import build_detectors
+
+    detectors = build_detectors(config.auto_eye.elements)
+    runner = BacktestScenarioRunner(config=config, detectors=detectors)
+    report = runner.run(
+        start_time_utc=start_utc,
+        end_time_utc=end_utc,
+        symbols=[asset],
+        warmup_bars=warmup_bars,
+    )
+    proposals = load_jsonl_rows(report.output_dir / "proposals.jsonl")
+    return report, proposals
+
+
+def format_backtest_price(value: object) -> str:
+    parsed = parse_auto_eye_float(value)
+    if parsed is None:
+        return "n/a"
+    return format_target(parsed)
+
+
+def render_backtest_proposal_text(
+    proposal: dict[str, object],
+    *,
+    index: int,
+    total: int,
+) -> str:
+    scenario_type = str(proposal.get("scenario_type") or "").strip().lower()
+    scenario_type_label = {
+        "trend_continuation": "Продолжение тренда",
+        "reversal_at_opposite": "Разворот от противоположной области",
+    }.get(scenario_type, scenario_type or "unknown")
+
+    created_at = str(proposal.get("created_at_utc") or "")
+    symbol = str(proposal.get("symbol") or "")
+    direction = str(proposal.get("direction") or "")
+    scenario_id = str(proposal.get("scenario_id") or "")
+
+    entry = proposal.get("entry") if isinstance(proposal.get("entry"), dict) else {}
+    sl = proposal.get("sl") if isinstance(proposal.get("sl"), dict) else {}
+    tp = proposal.get("tp") if isinstance(proposal.get("tp"), dict) else None
+
+    lines = [
+        f"<b>Сценарий {index}/{total}</b>",
+        f"<b>Актив:</b> <code>{html.escape(symbol)}</code>",
+        f"<b>Тип:</b> <b>{html.escape(scenario_type_label)}</b>",
+        f"<b>Направление:</b> <b>{html.escape(direction or 'n/a')}</b>",
+        f"<b>Время:</b> <b>{html.escape(format_local_datetime(created_at))}</b>",
+        f"<b>Entry:</b> <b>{html.escape(format_backtest_price(entry.get('price')))}</b>",
+        f"<b>SL:</b> <b>{html.escape(format_backtest_price(sl.get('price')))}</b>",
+    ]
+
+    if isinstance(tp, dict):
+        lines.append(
+            f"<b>TP:</b> <b>{html.escape(format_backtest_price(tp.get('price')))}</b>"
+        )
+    else:
+        lines.append("<b>TP:</b> <b>n/a</b>")
+
+    if scenario_id:
+        lines.append(f"<b>ID:</b> <code>{html.escape(scenario_id)}</code>")
+
+    return "\n".join(lines)
+
+
+async def execute_backtest_and_notify(
+    bot: Bot,
+    state: BotState,
+    *,
+    user_id: int,
+    asset: str,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> None:
+    backtest_cfg = state.config.telegram.backtest
+
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "<b>Бектест запущен</b>\n"
+                f"<b>Актив:</b> <code>{html.escape(asset)}</code>\n"
+                f"<b>Период:</b> <b>{html.escape(format_local_datetime(start_utc.isoformat()))}</b>"
+                " - "
+                f"<b>{html.escape(format_local_datetime(end_utc.isoformat()))}</b>"
+            ),
+        )
+
+        report, proposals = await asyncio.to_thread(
+            run_backtest_for_asset_sync,
+            state.config,
+            asset=asset,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            warmup_bars=backtest_cfg.warmup_bars,
+        )
+
+        proposals.sort(key=lambda row: str(row.get("created_at_utc") or ""))
+        total = len(proposals)
+        max_send = max(1, backtest_cfg.max_proposals_to_send)
+        send_rows = proposals[:max_send]
+
+        if total == 0:
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "<b>Бектест завершен</b>\n"
+                    f"<code>{html.escape(asset)}</code>: возможных сценариев не найдено."
+                ),
+            )
+            return
+
+        for idx, row in enumerate(send_rows, start=1):
+            await bot.send_message(
+                chat_id=user_id,
+                text=render_backtest_proposal_text(row, index=idx, total=total),
+            )
+
+        omitted = total - len(send_rows)
+        summary = (
+            "<b>Бектест завершен</b>\n"
+            f"<b>Run ID:</b> <code>{html.escape(str(getattr(report, 'run_id', 'n/a')))}</code>\n"
+            f"<b>Найдено сценариев:</b> <b>{total}</b>"
+        )
+        if omitted > 0:
+            summary += f"\n<b>Показано:</b> {len(send_rows)} (скрыто: {omitted})"
+
+        await bot.send_message(chat_id=user_id, text=summary)
+    except Exception:
+        logger.exception(
+            "Backtest task failed user_id=%s asset=%s start=%s end=%s",
+            user_id,
+            asset,
+            start_utc.isoformat(),
+            end_utc.isoformat(),
+        )
+        with contextlib.suppress(Exception):
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "<b>Бектест завершился с ошибкой.</b>\n"
+                    "Проверьте логи и параметры периода."
+                ),
+            )
+    finally:
+        current = state.backtest_tasks.get(user_id)
+        if current is asyncio.current_task():
+            state.backtest_tasks.pop(user_id, None)
+
+
+async def start_backtest_task(
+    bot: Bot,
+    state: BotState,
+    *,
+    user_id: int,
+    asset: str,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> tuple[bool, str]:
+    if not is_backtest_user_allowed(state, user_id):
+        return False, "Доступ к бектесту не разрешен."
+
+    existing = state.backtest_tasks.get(user_id)
+    if existing is not None and not existing.done():
+        return False, "Бектест уже выполняется. Дождитесь завершения текущего запуска."
+
+    normalized_asset = asset.strip().upper()
+    available_assets = set(get_backtest_assets(state.config, state.last_quotes))
+    if normalized_asset not in available_assets:
+        return False, "Этот актив недоступен для бектеста."
+
+    now_utc = datetime.now(timezone.utc)
+    if start_utc >= now_utc:
+        return False, "Начало интервала должно быть в прошлом."
+    if end_utc > now_utc + timedelta(minutes=1):
+        return False, "Конец интервала не должен быть в будущем."
+
+    max_hours = max(1, int(state.config.telegram.backtest.max_interval_hours))
+    duration_hours = (end_utc - start_utc).total_seconds() / 3600.0
+    if duration_hours > max_hours:
+        return (
+            False,
+            f"Интервал слишком большой. Максимум: {max_hours} ч.",
+        )
+
+    task = asyncio.create_task(
+        execute_backtest_and_notify(
+            bot,
+            state,
+            user_id=user_id,
+            asset=normalized_asset,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+    )
+    state.backtest_tasks[user_id] = task
+    return True, "Бектест запущен. Результаты придут отдельными сообщениями."
+
+
 async def refresh_quotes_and_alerts(
     bot: Bot,
     state: BotState,
@@ -2640,7 +3461,10 @@ async def send_dashboard_message(
     )
     sent = await message.answer(
         text=text,
-        reply_markup=build_home_keyboard(has_alerts=bool(alerts)),
+        reply_markup=build_home_keyboard(
+            has_alerts=bool(alerts),
+            has_backtest=is_backtest_user_allowed(state, user_id),
+        ),
     )
     state.dashboard_message_ids[user_id] = (sent.chat.id, sent.message_id)
 
@@ -2653,6 +3477,48 @@ async def send_alerts_menu_message(message: Message, state: BotState) -> None:
     await message.answer(
         text=render_alerts_menu_text(chat_alerts),
         reply_markup=build_alerts_menu_keyboard(assets_for_menu),
+    )
+
+
+async def send_backtest_assets_menu_message(message: Message, state: BotState) -> None:
+    assets = get_backtest_assets(state.config, state.last_quotes)
+    await message.answer(
+        text=render_backtest_assets_menu_text(),
+        reply_markup=build_backtest_assets_keyboard(assets),
+    )
+
+
+async def send_backtest_period_menu_message(
+    message: Message,
+    state: BotState,
+    asset: str,
+) -> None:
+    _ = state
+    await message.answer(
+        text=render_backtest_period_menu_text(asset),
+        reply_markup=build_backtest_period_keyboard(asset),
+    )
+
+
+async def edit_backtest_assets_menu_message(query: CallbackQuery, state: BotState) -> None:
+    assets = get_backtest_assets(state.config, state.last_quotes)
+    await safe_edit_message(
+        query,
+        text=render_backtest_assets_menu_text(),
+        reply_markup=build_backtest_assets_keyboard(assets),
+    )
+
+
+async def edit_backtest_period_menu_message(
+    query: CallbackQuery,
+    state: BotState,
+    asset: str,
+) -> None:
+    _ = state
+    await safe_edit_message(
+        query,
+        text=render_backtest_period_menu_text(asset),
+        reply_markup=build_backtest_period_keyboard(asset),
     )
 
 
@@ -2683,7 +3549,10 @@ async def edit_dashboard_message(
     await safe_edit_message(
         query,
         text=text,
-        reply_markup=build_home_keyboard(has_alerts=bool(alerts)),
+        reply_markup=build_home_keyboard(
+            has_alerts=bool(alerts),
+            has_backtest=is_backtest_user_allowed(state, user_id),
+        ),
     )
     if query.message is not None:
         state.dashboard_message_ids[user_id] = (
@@ -2865,12 +3734,169 @@ def build_router(state: BotState) -> Router:
 
         await send_dashboard_message(message, state, quotes=quotes)
 
+    @router.message(Command("backtest"))
+    async def backtest_command_handler(message: Message) -> None:
+        if not await ensure_message_allowed(state, message):
+            return
+
+        user_id = get_user_id_from_message(message)
+        if not is_backtest_user_allowed(state, user_id):
+            await message.answer("Доступ к бектесту не разрешен.")
+            return
+
+        state.pending_inputs.pop(user_id, None)
+        await send_backtest_assets_menu_message(message, state)
     @router.callback_query(F.data == CALLBACK_NOOP)
     async def noop_handler(query: CallbackQuery) -> None:
         if not await ensure_callback_allowed(state, query):
             return
         await query.answer()
 
+    @router.callback_query(F.data == CALLBACK_MENU_BACKTEST)
+    async def menu_backtest_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        if not is_backtest_user_allowed(state, user_id):
+            await query.answer("Нет доступа к бектесту", show_alert=False)
+            return
+
+        state.pending_inputs.pop(user_id, None)
+        await query.answer()
+        await edit_backtest_assets_menu_message(query, state)
+
+    @router.callback_query(F.data.startswith(CALLBACK_BACKTEST_ASSET_PREFIX))
+    async def backtest_asset_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        if not is_backtest_user_allowed(state, user_id):
+            await query.answer("Нет доступа к бектесту", show_alert=False)
+            return
+
+        data = str(query.data or "")
+        asset = data.removeprefix(CALLBACK_BACKTEST_ASSET_PREFIX).strip().upper()
+        if not asset:
+            await query.answer()
+            await edit_backtest_assets_menu_message(query, state)
+            return
+
+        state.pending_inputs.pop(user_id, None)
+        await query.answer()
+        await edit_backtest_period_menu_message(query, state, asset)
+
+    @router.callback_query(F.data.startswith(CALLBACK_BACKTEST_BACK_PREFIX))
+    async def backtest_back_to_period_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        if not is_backtest_user_allowed(state, user_id):
+            await query.answer("Нет доступа к бектесту", show_alert=False)
+            return
+
+        data = str(query.data or "")
+        asset = data.removeprefix(CALLBACK_BACKTEST_BACK_PREFIX).strip().upper()
+        if not asset:
+            await query.answer()
+            await edit_backtest_assets_menu_message(query, state)
+            return
+
+        state.pending_inputs.pop(user_id, None)
+        await query.answer()
+        await edit_backtest_period_menu_message(query, state, asset)
+
+    @router.callback_query(F.data.startswith(CALLBACK_BACKTEST_RANGE_PREFIX))
+    async def backtest_quick_range_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        if not is_backtest_user_allowed(state, user_id):
+            await query.answer("Нет доступа к бектесту", show_alert=False)
+            return
+
+        data = str(query.data or "")
+        payload = data.removeprefix(CALLBACK_BACKTEST_RANGE_PREFIX)
+        parts = payload.split("|", maxsplit=1)
+        if len(parts) != 2:
+            await query.answer()
+            await edit_backtest_assets_menu_message(query, state)
+            return
+
+        asset = parts[0].strip().upper()
+        try:
+            hours = int(parts[1])
+        except ValueError:
+            await query.answer()
+            await edit_backtest_period_menu_message(query, state, asset)
+            return
+
+        if not asset or hours <= 0:
+            await query.answer()
+            await edit_backtest_assets_menu_message(query, state)
+            return
+
+        end_utc = datetime.now(timezone.utc)
+        start_utc = end_utc - timedelta(hours=hours)
+        ok, response_text = await start_backtest_task(
+            query.bot,
+            state,
+            user_id=user_id,
+            asset=asset,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+        await query.answer(response_text if not ok else "Бектест запущен", show_alert=not ok)
+        if ok:
+            await edit_backtest_period_menu_message(query, state, asset)
+
+    @router.callback_query(F.data.startswith(CALLBACK_BACKTEST_CUSTOM_PREFIX))
+    async def backtest_custom_range_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        if not is_backtest_user_allowed(state, user_id):
+            await query.answer("Нет доступа к бектесту", show_alert=False)
+            return
+
+        data = str(query.data or "")
+        asset = data.removeprefix(CALLBACK_BACKTEST_CUSTOM_PREFIX).strip().upper()
+        if not asset:
+            await query.answer()
+            await edit_backtest_assets_menu_message(query, state)
+            return
+
+        state.pending_inputs[user_id] = {
+            "type": "backtest_interval_input",
+            "asset": asset,
+        }
+
+        await query.answer()
+        await safe_edit_message(
+            query,
+            text=(
+                f"<b>Бектест: {html.escape(asset)}</b>\n"
+                "Введите интервал в <b>GMT+5</b>:\n"
+                "<code>dd.mm.yyyy hh:mm - dd.mm.yyyy hh:mm</code>\n"
+                "или\n"
+                "<code>yyyy-mm-dd hh:mm - yyyy-mm-dd hh:mm</code>"
+            ),
+            reply_markup=build_backtest_input_keyboard(asset),
+        )
+
+    @router.callback_query(F.data == CALLBACK_BACKTEST_CANCEL)
+    async def backtest_cancel_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.pending_inputs.pop(user_id, None)
+        await query.answer()
+        await edit_dashboard_message(query, state)
     @router.callback_query(F.data == CALLBACK_REFRESH)
     async def refresh_handler(query: CallbackQuery) -> None:
         if not await ensure_callback_allowed(state, query):
@@ -2882,6 +3908,7 @@ def build_router(state: BotState) -> Router:
 
         try:
             quotes = await refresh_quotes_and_alerts(query.bot, state, process_alerts=True)
+            await send_auto_eye_notifications(query.bot, state)
         except Exception:
             logger.exception("Manual refresh failed")
             user_id = get_user_id_from_query(query)
@@ -2889,7 +3916,10 @@ def build_router(state: BotState) -> Router:
             await safe_edit_message(
                 query,
                 text="<b>Не удалось обновить котировки.</b>",
-                reply_markup=build_home_keyboard(has_alerts=has_alerts),
+                reply_markup=build_home_keyboard(
+                    has_alerts=has_alerts,
+                    has_backtest=is_backtest_user_allowed(state, user_id),
+                ),
             )
             return
 
@@ -3788,6 +4818,42 @@ def build_router(state: BotState) -> Router:
             await continue_alert_edit_flow_message(message, state, user_id)
             return
 
+        if input_type == "backtest_interval_input":
+            if not is_backtest_user_allowed(state, user_id):
+                state.pending_inputs.pop(user_id, None)
+                await message.answer("Доступ к бектесту не разрешен.")
+                return
+
+            parsed_interval = parse_backtest_interval_input(message.text or "")
+            if parsed_interval is None:
+                await message.answer(
+                    "Не распознал интервал.\n"
+                    "Формат: <code>dd.mm.yyyy hh:mm - dd.mm.yyyy hh:mm</code>",
+                    reply_markup=build_backtest_input_keyboard(asset_text),
+                )
+                return
+
+            start_utc, end_utc = parsed_interval
+            ok, response_text = await start_backtest_task(
+                message.bot,
+                state,
+                user_id=user_id,
+                asset=asset_text,
+                start_utc=start_utc,
+                end_utc=end_utc,
+            )
+
+            if not ok:
+                await message.answer(
+                    response_text,
+                    reply_markup=build_backtest_input_keyboard(asset_text),
+                )
+                return
+
+            state.pending_inputs.pop(user_id, None)
+            await message.answer(response_text)
+            await send_backtest_period_menu_message(message, state, asset_text)
+            return
         if input_type == ALERT_KIND_PRICE:
             target = parse_price(message.text or "")
             direction = waiting.get("direction", "")
@@ -4121,7 +5187,14 @@ async def periodic_checker(bot: Bot, state: BotState) -> None:
             logger.info("Periodic checker cancelled")
             raise
         except Exception:
-            logger.exception("Periodic check failed")
+            logger.exception("Periodic quote check failed")
+
+        try:
+            await send_auto_eye_notifications(bot, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic auto-eye notifications check failed")
 
         await asyncio.sleep(interval)
 
@@ -4169,6 +5242,27 @@ def run(config_path: Path) -> None:
     alerts_path = resolve_output_path(config.telegram.alerts_json)
     quotes_path = resolve_output_path(config.scraper.output_json)
     timeframe_rules = load_timeframe_rules(TIMEFRAME_RULES_PATH)
+    auto_eye_state_dir = resolve_auto_eye_state_dir(config)
+    auto_eye_seen_path = resolve_output_path(
+        config.telegram.auto_eye_notifications.seen_ids_json
+    )
+
+    logger.info(
+        "Auto-eye notifications config: enabled=%s state_dir=%s timeframes=%s elements=%s seen_store=%s",
+        config.telegram.auto_eye_notifications.enabled,
+        auto_eye_state_dir,
+        ", ".join(config.telegram.auto_eye_notifications.timeframes),
+        ", ".join(config.telegram.auto_eye_notifications.elements),
+        auto_eye_seen_path,
+    )
+    logger.info(
+        "Backtest config: enabled=%s allowed=%s max_interval_hours=%s warmup_bars=%s max_proposals_to_send=%s",
+        config.telegram.backtest.enabled,
+        ", ".join(str(user_id) for user_id in config.telegram.backtest.allowed_user_ids),
+        config.telegram.backtest.max_interval_hours,
+        config.telegram.backtest.warmup_bars,
+        config.telegram.backtest.max_proposals_to_send,
+    )
 
     state = BotState(
         config=config,
@@ -4180,6 +5274,9 @@ def run(config_path: Path) -> None:
         alert_edit_sessions={},
         last_quotes=load_cached_quotes(quotes_path),
         dashboard_message_ids={},
+        auto_eye_state_dir=auto_eye_state_dir,
+        auto_eye_seen_store=AutoEyeSeenStore(auto_eye_seen_path),
+        backtest_tasks={},
     )
 
     bot = Bot(
@@ -4198,12 +5295,21 @@ def run(config_path: Path) -> None:
     async def on_shutdown() -> None:
         logger.info("Bot shutdown started")
 
-        if state.periodic_task is None:
-            return
+        if state.periodic_task is not None:
+            state.periodic_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await state.periodic_task
 
-        state.periodic_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await state.periodic_task
+        backtest_tasks = [
+            task
+            for task in state.backtest_tasks.values()
+            if not task.done()
+        ]
+        for task in backtest_tasks:
+            task.cancel()
+        for task in backtest_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
         logger.info("Bot shutdown completed")
 
@@ -4213,3 +5319,26 @@ def run(config_path: Path) -> None:
 if __name__ == "__main__":
     args = parse_args()
     run(args.config)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
