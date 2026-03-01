@@ -14,11 +14,13 @@ from config_loader import AutoEyeConfig
 
 from auto_eye.detectors.fractal import FRACTAL_HIGH, FRACTAL_LOW, FractalDetector
 from auto_eye.detectors.snr import (
+    BREAK_DOWN_CLOSE,
     BREAK_UP_CLOSE,
+    ROLE_RESISTANCE,
     ROLE_SUPPORT,
     SNRDetector,
 )
-from auto_eye.models import OHLCBar, STATUS_INVALIDATED, TrackedElement
+from auto_eye.models import OHLCBar, STATUS_INVALIDATED, TrackedElement, datetime_to_iso
 
 
 def build_config() -> AutoEyeConfig:
@@ -115,6 +117,32 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
         self.assertIsNotNone(item.metadata.get("departure_range_end_time"))
         self.assertAlmostEqual(float(item.metadata.get("l_price_used")), 9.15)
         self.assertEqual(item.metadata.get("l_rule_used"), "bullish_C2close")
+        self.assertFalse(bool(item.metadata.get("invalid_calc")))
+
+    def test_bearish_snr_uses_c1_close_for_line_and_departure_high(self) -> None:
+        bars = [
+            make_bar(0, open_price=10.2, high_price=10.5, low_price=9.8, close_price=10.0),
+            make_bar(1, open_price=9.7, high_price=10.8, low_price=8.0, close_price=9.8),
+            make_bar(2, open_price=10.1, high_price=11.2, low_price=9.7, close_price=10.1),
+            make_bar(3, open_price=10.0, high_price=10.6, low_price=9.2, close_price=9.9),
+        ]
+        found = self.snr.detect(
+            symbol="EURUSD",
+            timeframe="M15",
+            bars=bars,
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(found), 1)
+        item = found[0]
+        self.assertEqual(item.metadata.get("role"), ROLE_RESISTANCE)
+        self.assertEqual(item.metadata.get("break_type"), BREAK_DOWN_CLOSE)
+        self.assertAlmostEqual(float(item.metadata.get("l_price_used")), 10.0)
+        self.assertEqual(item.metadata.get("l_rule_used"), "bearish_C1close")
+        self.assertAlmostEqual(float(item.metadata.get("departure_extreme_price")), 11.2)
+        self.assertAlmostEqual(float(item.metadata.get("snr_low")), 10.0)
+        self.assertAlmostEqual(float(item.metadata.get("snr_high")), 11.2)
+        self.assertFalse(bool(item.metadata.get("invalid_calc")))
 
     def test_snr_status_moves_to_invalidated_after_retest(self) -> None:
         bars = [
@@ -250,7 +278,7 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
             config=self.config,
         )
         self.assertEqual(item.status, STATUS_INVALIDATED)
-        self.assertEqual(item.metadata.get("invalidated_time"), wick_break_bar.time.isoformat())
+        self.assertEqual(item.metadata.get("invalidated_time"), datetime_to_iso(wick_break_bar.time))
 
 
 if __name__ == "__main__":

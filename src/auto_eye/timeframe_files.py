@@ -476,6 +476,8 @@ class TimeframeFileStore:
                 or metadata.get("departure_range_end_time"),
                 "snr_low": raw.get("snr_low"),
                 "snr_high": raw.get("snr_high"),
+                "invalid_calc": raw.get("invalid_calc"),
+                "invalid_calc_reason": raw.get("invalid_calc_reason"),
                 "status": raw.get("status"),
                 "retest_time_utc": raw.get("retest_time"),
                 "invalidated_time_utc": raw.get("invalidated_time"),
@@ -594,6 +596,8 @@ class TimeframeFileStore:
                 or raw.get("departure_range_end_time"),
                 "snr_low": raw.get("snr_low"),
                 "snr_high": raw.get("snr_high"),
+                "invalid_calc": raw.get("invalid_calc"),
+                "invalid_calc_reason": raw.get("invalid_calc_reason"),
                 "status": raw.get("status"),
                 "retest_time": raw.get("retest_time_utc") or raw.get("retest_time"),
                 "invalidated_time": raw.get("invalidated_time_utc")

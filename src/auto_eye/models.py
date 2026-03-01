@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 STATUS_ACTIVE = "active"
@@ -14,6 +14,8 @@ STATUS_INVALIDATED = "invalidated"
 STATUS_BROKEN = "broken"
 STATUS_EXPIRED = "expired"
 
+OUTPUT_JSON_TIMEZONE = timezone(timedelta(hours=5))
+
 
 def ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -24,7 +26,7 @@ def ensure_utc(value: datetime) -> datetime:
 def datetime_to_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return ensure_utc(value).isoformat()
+    return ensure_utc(value).astimezone(OUTPUT_JSON_TIMEZONE).isoformat()
 
 
 def datetime_from_iso(value: str | None) -> datetime | None:
@@ -35,6 +37,25 @@ def datetime_from_iso(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return ensure_utc(parsed)
+
+
+def _convert_iso_strings_to_output_timezone(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(OUTPUT_JSON_TIMEZONE).isoformat()
+    if isinstance(value, dict):
+        return {
+            key: _convert_iso_strings_to_output_timezone(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_convert_iso_strings_to_output_timezone(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -91,6 +112,12 @@ class TrackedElement:
             return self._to_rb_dict()
         return self._to_fvg_dict()
 
+    def _metadata_for_output(self) -> dict[str, Any]:
+        converted = _convert_iso_strings_to_output_timezone(self.metadata)
+        if isinstance(converted, dict):
+            return converted
+        return {}
+
     def _to_fvg_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -110,7 +137,7 @@ class TrackedElement:
             "mitigated_time": datetime_to_iso(self.mitigated_time),
             "fill_price": self.fill_price,
             "fill_percent": self.fill_percent,
-            "metadata": self.metadata,
+            "metadata": self._metadata_for_output(),
         }
 
     def _to_fractal_dict(self) -> dict[str, Any]:
@@ -175,12 +202,20 @@ class TrackedElement:
             "status": self.status,
             "broken_time": datetime_to_iso(broken_time),
             "broken_side": broken_side,
-            "metadata": self.metadata,
+            "metadata": self._metadata_for_output(),
         }
 
     def _to_snr_dict(self) -> dict[str, Any]:
-        role = str(self.metadata.get("role") or self.direction or "")
-        break_type = str(self.metadata.get("break_type") or "")
+        role = str(self.metadata.get("role") or self.direction or "").strip().lower()
+        break_type = str(self.metadata.get("break_type") or "").strip().lower()
+        if break_type == "break_up_close":
+            role = "support"
+        elif break_type == "break_down_close":
+            role = "resistance"
+        elif role not in {"support", "resistance"}:
+            role = "support"
+        if break_type not in {"break_up_close", "break_down_close"}:
+            break_type = "break_up_close" if role == "support" else "break_down_close"
         break_time = datetime_from_iso(str(self.metadata.get("break_time") or ""))
         if break_time is None:
             break_time = self.formation_time
@@ -231,14 +266,16 @@ class TrackedElement:
             self.metadata.get("snr_high"),
             fallback=self.zone_high,
         )
+        snr_bottom = min(snr_low, snr_high)
+        snr_top = max(snr_low, snr_high)
         departure_extreme_price = self._safe_optional_float(
             self.metadata.get("departure_extreme_price")
         )
         if departure_extreme_price is None:
             if role == "support":
-                departure_extreme_price = snr_low
+                departure_extreme_price = snr_bottom
             else:
-                departure_extreme_price = snr_high
+                departure_extreme_price = snr_top
         departure_extreme_time = datetime_from_iso(
             str(self.metadata.get("departure_extreme_time") or "")
         )
@@ -254,6 +291,14 @@ class TrackedElement:
         )
         if departure_range_end_time is None:
             departure_range_end_time = break_time
+        invalid_calc = bool(self.metadata.get("invalid_calc"))
+        invalid_calc_reason = self.metadata.get("invalid_calc_reason")
+        if invalid_calc_reason is not None:
+            invalid_calc_reason = str(invalid_calc_reason)
+        metadata_output = self._metadata_for_output()
+        # Keep canonical price ordering in JSON payloads: low <= high.
+        metadata_output["snr_low"] = snr_bottom
+        metadata_output["snr_high"] = snr_top
         return {
             "id": self.id,
             "element_type": "snr",
@@ -273,16 +318,18 @@ class TrackedElement:
             "l_price_used": l_price_used,
             "l_rule_used": l_rule_used,
             "extreme_price": extreme_price,
-            "snr_low": snr_low,
-            "snr_high": snr_high,
+            "snr_low": snr_bottom,
+            "snr_high": snr_top,
             "departure_extreme_price": departure_extreme_price,
             "departure_extreme_time": datetime_to_iso(departure_extreme_time),
             "departure_range_start_time": datetime_to_iso(departure_range_start_time),
             "departure_range_end_time": datetime_to_iso(departure_range_end_time),
+            "invalid_calc": invalid_calc,
+            "invalid_calc_reason": invalid_calc_reason,
             "status": self.status,
             "retest_time": datetime_to_iso(self.touched_time),
             "invalidated_time": datetime_to_iso(self.mitigated_time),
-            "metadata": self.metadata,
+            "metadata": metadata_output,
         }
 
     def _to_rb_dict(self) -> dict[str, Any]:
@@ -383,7 +430,7 @@ class TrackedElement:
             "status": self.status,
             "broken_time": datetime_to_iso(broken_time),
             "broken_side": broken_side,
-            "metadata": self.metadata,
+            "metadata": self._metadata_for_output(),
         }
 
     @classmethod
@@ -549,9 +596,23 @@ class TrackedElement:
         if break_time is None:
             return None
 
-        role = str(raw.get("role") or "")
-        snr_low = cls._safe_optional_float(raw.get("snr_low"))
-        snr_high = cls._safe_optional_float(raw.get("snr_high"))
+        role = str(raw.get("role") or "").strip().lower()
+        break_type = str(raw.get("break_type") or "").strip().lower()
+        if break_type == "break_up_close":
+            role = "support"
+        elif break_type == "break_down_close":
+            role = "resistance"
+        elif role not in {"support", "resistance"}:
+            role = "support"
+        if break_type not in {"break_up_close", "break_down_close"}:
+            break_type = "break_up_close" if role == "support" else "break_down_close"
+        raw_snr_low = cls._safe_optional_float(raw.get("snr_low"))
+        raw_snr_high = cls._safe_optional_float(raw.get("snr_high"))
+        snr_low: float | None = None
+        snr_high: float | None = None
+        if raw_snr_low is not None and raw_snr_high is not None:
+            snr_low = min(raw_snr_low, raw_snr_high)
+            snr_high = max(raw_snr_low, raw_snr_high)
         l_price = cls._safe_optional_float(raw.get("l_price"))
         l_alt_price = cls._safe_optional_float(raw.get("l_alt_price"))
         l_price_bearish = cls._safe_optional_float(raw.get("l_price_bearish"))
@@ -614,15 +675,21 @@ class TrackedElement:
         retest_time = datetime_from_iso(str(raw.get("retest_time") or ""))
         invalidated_time = datetime_from_iso(str(raw.get("invalidated_time") or ""))
         break_close = cls._safe_optional_float(raw.get("break_close"))
+        invalid_calc_raw = raw.get("invalid_calc")
+        invalid_calc_reason_raw = raw.get("invalid_calc_reason")
 
         metadata = raw.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
+        if invalid_calc_raw is None:
+            invalid_calc_raw = metadata.get("invalid_calc")
+        if invalid_calc_reason_raw is None:
+            invalid_calc_reason_raw = metadata.get("invalid_calc_reason")
         metadata.update(
             {
                 "origin_fractal_id": str(raw.get("origin_fractal_id") or ""),
-                "role": str(raw.get("role") or ""),
-                "break_type": str(raw.get("break_type") or ""),
+                "role": role,
+                "break_type": break_type,
                 "break_time": datetime_to_iso(break_time),
                 "break_close": break_close,
                 "l_price": l_price,
@@ -640,6 +707,12 @@ class TrackedElement:
                 "departure_extreme_time": datetime_to_iso(departure_extreme_time),
                 "departure_range_start_time": datetime_to_iso(departure_range_start_time),
                 "departure_range_end_time": datetime_to_iso(departure_range_end_time),
+                "invalid_calc": bool(invalid_calc_raw),
+                "invalid_calc_reason": (
+                    None
+                    if invalid_calc_reason_raw is None
+                    else str(invalid_calc_reason_raw)
+                ),
                 "retest_time": datetime_to_iso(retest_time),
                 "invalidated_time": datetime_to_iso(invalidated_time),
             }

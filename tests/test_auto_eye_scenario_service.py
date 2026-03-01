@@ -757,6 +757,109 @@ class ScenarioSnapshotBuilderTests(unittest.TestCase):
                 "h1-support-near-old",
             )
 
+    def test_does_not_duplicate_same_htf_ltf_pair_when_price_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "Speculator" / "output"
+            output_root.mkdir(parents=True, exist_ok=True)
+            config = build_config(output_root)
+
+            state_payload = {
+                "symbol": "SPX500",
+                "market": {"price": 101.0},
+                "timeframes": {
+                    "H1": {
+                        "elements": {
+                            "fvg": [
+                                {
+                                    "id": "h1-fvg-bull",
+                                    "direction": "bullish",
+                                    "status": "active",
+                                    "formation_time_utc": "2026-02-27T10:00:00+00:00",
+                                    "fvg_low": 100.0,
+                                    "fvg_high": 102.0,
+                                }
+                            ],
+                            "snr": [
+                                {
+                                    "id": "h1-snr-target-a",
+                                    "role": "resistance",
+                                    "status": "active",
+                                    "break_time_utc": "2026-02-27T08:00:00+00:00",
+                                    "snr_low": 103.0,
+                                    "snr_high": 104.0,
+                                }
+                            ],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                    "M5": {
+                        "elements": {
+                            "fvg": [
+                                {
+                                    "id": "m5-fvg-bull",
+                                    "direction": "bullish",
+                                    "status": "active",
+                                    "formation_time_utc": "2026-02-27T10:05:00+00:00",
+                                    "fvg_low": 100.8,
+                                    "fvg_high": 101.2,
+                                }
+                            ],
+                            "snr": [],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                },
+            }
+            write_state(config, "SPX500", state_payload)
+            write_trend(config, "SPX500", "bullish")
+
+            builder = ScenarioSnapshotBuilder(config=config)
+            first_report = builder.build_all()
+            self.assertEqual(first_report.scenarios_created, 1)
+
+            scenarios_before = read_scenarios(config, "SPX500")
+            self.assertEqual(len(scenarios_before["active"]), 1)
+            initial_id = scenarios_before["active"][0]["scenario_id"]
+
+            # Change market/TP conditions, but keep same HTF/LTF anchors.
+            state_payload["market"]["price"] = 101.7
+            state_payload["timeframes"]["H1"]["elements"]["snr"] = [
+                {
+                    "id": "h1-snr-target-a",
+                    "role": "resistance",
+                    "status": "active",
+                    "break_time_utc": "2026-02-27T08:00:00+00:00",
+                    "snr_low": 103.0,
+                    "snr_high": 104.0,
+                },
+                {
+                    "id": "h1-snr-target-b",
+                    "role": "resistance",
+                    "status": "active",
+                    "break_time_utc": "2026-02-27T09:00:00+00:00",
+                    "snr_low": 102.2,
+                    "snr_high": 102.8,
+                },
+            ]
+            write_state(config, "SPX500", state_payload)
+
+            second_report = builder.build_all()
+            self.assertEqual(second_report.scenarios_created, 0)
+
+            scenarios_after = read_scenarios(config, "SPX500")
+            self.assertEqual(len(scenarios_after["active"]), 1)
+            self.assertEqual(scenarios_after["active"][0]["scenario_id"], initial_id)
+            self.assertEqual(
+                scenarios_after["active"][0]["htf_anchor"]["element_id"],
+                "h1-fvg-bull",
+            )
+            self.assertEqual(
+                scenarios_after["active"][0]["ltf_confirmation"]["element_id"],
+                "m5-fvg-bull",
+            )
+
     def test_collapse_overlapping_snr_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_root = Path(tmp_dir) / "Speculator" / "output"

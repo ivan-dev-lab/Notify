@@ -15,6 +15,7 @@ from auto_eye.models import (
     STATUS_EXPIRED,
     STATUS_INVALIDATED,
     STATUS_MITIGATED_FULL,
+    datetime_to_iso,
 )
 from auto_eye.mt5_source import MT5BarsSource
 from auto_eye.timeframe_files import REQUIRED_STATE_TIMEFRAMES, STATE_SCHEMA_VERSION
@@ -110,7 +111,7 @@ class StateSnapshotBuilder:
 
         state["schema_version"] = str(state.get("schema_version") or STATE_SCHEMA_VERSION)
         state["symbol"] = symbol
-        state["updated_at_utc"] = now_utc.isoformat()
+        state["updated_at_utc"] = datetime_to_iso(now_utc)
         state["market"] = self._build_market(symbol=symbol, existing=existing, now_utc=now_utc)
         state["timeframes"] = self._normalize_timeframes(state.get("timeframes"))
         state.pop("derived", None)
@@ -245,7 +246,7 @@ class StateSnapshotBuilder:
             "bid": None,
             "ask": None,
             "source": "MT5",
-            "tick_time_utc": now_utc.isoformat(),
+            "tick_time_utc": datetime_to_iso(now_utc),
         }
 
     def _load_existing_state(self, symbol: str) -> dict[str, object] | None:
@@ -288,7 +289,7 @@ class StateSnapshotBuilder:
         schema_path = self.state_dir / "schema_version.json"
         payload = {
             "schema_version": STATE_SCHEMA_VERSION,
-            "updated_at_utc": now_utc.isoformat(),
+            "updated_at_utc": datetime_to_iso(now_utc),
             "notes": "State schema for market elements only",
         }
         if schema_path.exists() and schema_path.stat().st_size > 0:

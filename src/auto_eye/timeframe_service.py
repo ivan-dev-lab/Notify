@@ -96,6 +96,7 @@ class TimeframeUpdateService:
                     symbols=symbols,
                     now_utc=now_utc,
                     previous=snapshot,
+                    force_full_scan=force,
                 )
                 reports.append(report)
 
@@ -114,6 +115,7 @@ class TimeframeUpdateService:
         symbols: list[str],
         now_utc: datetime,
         previous: TimeframeSnapshot,
+        force_full_scan: bool = False,
     ) -> TimeframeUpdateReport:
         history_cutoff = now_utc - timedelta(
             days=self.config.auto_eye.history_days + self.config.auto_eye.history_buffer_days
@@ -135,7 +137,7 @@ class TimeframeUpdateService:
             ]
             last_bar = self._resolve_last_bar(timeframe, symbol, previous)
 
-            if last_bar is None or not previous.initialized:
+            if force_full_scan or last_bar is None or not previous.initialized:
                 bars = self.source.fetch_history(
                     symbol=symbol,
                     timeframe_code=timeframe,
@@ -177,6 +179,7 @@ class TimeframeUpdateService:
                     bars=bars,
                     point_size=point_size,
                     existing=symbol_existing,
+                    drop_unmatched_snr=force_full_scan,
                 )
             )
 
@@ -305,16 +308,25 @@ class TimeframeUpdateService:
         bars: list,
         point_size: float,
         existing: list[TrackedElement],
+        drop_unmatched_snr: bool = False,
     ) -> list[TrackedElement]:
         result: list[TrackedElement] = []
         enabled_names = set(self.detectors.keys())
 
         for detector_name, detector in self.detectors.items():
-            detector_existing = {
-                element.id: element
+            detector_existing_items = [
+                element
                 for element in existing
                 if element.element_type == detector_name
-            }
+            ]
+            preserve_unmatched_existing = (
+                detector_name != "snr" or not drop_unmatched_snr
+            )
+            detector_existing = (
+                {element.id: element for element in detector_existing_items}
+                if preserve_unmatched_existing
+                else {}
+            )
             detected = detector.detect(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -325,11 +337,14 @@ class TimeframeUpdateService:
             for item in detected:
                 matched_id = self._find_matching_existing_id(
                     candidate=item,
-                    existing=list(detector_existing.values()),
+                    existing=detector_existing_items,
                 )
                 if matched_id is not None and matched_id != item.id:
                     item.id = matched_id
-                detector_existing.setdefault(item.id, item)
+                if preserve_unmatched_existing:
+                    detector_existing.setdefault(item.id, item)
+                else:
+                    detector_existing[item.id] = item
 
             for item in detector_existing.values():
                 detector.update_status(

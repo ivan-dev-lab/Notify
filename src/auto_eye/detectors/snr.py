@@ -7,7 +7,7 @@ from datetime import datetime
 from config_loader import AutoEyeConfig
 
 from auto_eye.detectors.base import MarketElementDetector
-from auto_eye.detectors.fractal import FRACTAL_HIGH, FRACTAL_LOW, FractalDetector
+from auto_eye.detectors.fractal import FractalDetector
 from auto_eye.models import (
     OHLCBar,
     STATUS_ACTIVE,
@@ -22,8 +22,6 @@ ROLE_SUPPORT = "support"
 ROLE_RESISTANCE = "resistance"
 BREAK_UP_CLOSE = "break_up_close"
 BREAK_DOWN_CLOSE = "break_down_close"
-L_RULE_BEARISH = "bearish_C1close"
-L_RULE_BULLISH = "bullish_C2close"
 
 
 class SNRDetector(MarketElementDetector):
@@ -63,17 +61,12 @@ class SNRDetector(MarketElementDetector):
             if confirm_index is None:
                 continue
 
-            (
-                l_price_bearish,
-                l_alt_bearish,
-                l_price_bullish,
-                l_alt_bullish,
-            ) = self._line_bundle_from_fractal(fractal)
-
             break_data = self._find_break(
                 bars=bars,
-                l_price_bearish=l_price_bearish,
-                l_price_bullish=l_price_bullish,
+                l_price=self._metadata_float(
+                    fractal.metadata.get("l_price"),
+                    fallback=fractal.zone_low,
+                ),
                 start_index=confirm_index + 1,
             )
             if break_data is None:
@@ -89,10 +82,6 @@ class SNRDetector(MarketElementDetector):
                 break_bar=break_bar,
                 bars=bars,
                 config=config,
-                l_price_bearish=l_price_bearish,
-                l_alt_bearish=l_alt_bearish,
-                l_price_bullish=l_price_bullish,
-                l_alt_bullish=l_alt_bullish,
             )
             if element is None:
                 continue
@@ -134,13 +123,13 @@ class SNRDetector(MarketElementDetector):
 
         if element.status != STATUS_INVALIDATED:
             for bar in future_bars:
-                if role == ROLE_SUPPORT and (bar.close < snr_low or bar.low < snr_low):
+                if role == ROLE_SUPPORT and bar.close < snr_low:
                     element.status = STATUS_INVALIDATED
                     if element.mitigated_time is None:
                         element.mitigated_time = bar.time
                     break
 
-                if role == ROLE_RESISTANCE and (bar.close > snr_high or bar.high > snr_high):
+                if role == ROLE_RESISTANCE and bar.close > snr_high:
                     element.status = STATUS_INVALIDATED
                     if element.mitigated_time is None:
                         element.mitigated_time = bar.time
@@ -169,14 +158,14 @@ class SNRDetector(MarketElementDetector):
         break_bar: OHLCBar,
         bars: Sequence[OHLCBar],
         config: AutoEyeConfig,
-        l_price_bearish: float,
-        l_alt_bearish: float,
-        l_price_bullish: float,
-        l_alt_bullish: float,
     ) -> TrackedElement | None:
+        l_price = self._metadata_float(
+            fractal.metadata.get("l_price"),
+            fallback=fractal.zone_low,
+        )
         fractal_extreme_price = self._metadata_float(
             fractal.metadata.get("extreme_price"),
-            fallback=self._fractal_extreme_fallback(fractal),
+            fallback=fractal.zone_high,
         )
 
         start_time = self._fractal_start_time(fractal=fractal, config=config)
@@ -192,23 +181,11 @@ class SNRDetector(MarketElementDetector):
             departure_price = fractal_extreme_price
             departure_time = fractal.c2_time
 
-        (
-            l_price_used,
-            l_alt_used,
-            l_rule_used,
-        ) = self._line_for_role(
-            role=role,
-            l_price_bearish=l_price_bearish,
-            l_alt_bearish=l_alt_bearish,
-            l_price_bullish=l_price_bullish,
-            l_alt_bullish=l_alt_bullish,
-        )
-
         if role == ROLE_SUPPORT:
             snr_low = float(departure_price)
-            snr_high = float(l_price_used)
+            snr_high = float(l_price)
         else:
-            snr_low = float(l_price_used)
+            snr_low = float(l_price)
             snr_high = float(departure_price)
 
         break_time_iso = break_bar.time.isoformat()
@@ -240,14 +217,7 @@ class SNRDetector(MarketElementDetector):
                 "break_type": break_type,
                 "break_time": break_time_iso,
                 "break_close": float(break_bar.close),
-                "l_price": float(l_price_used),
-                "l_alt_price": float(l_alt_used),
-                "l_price_bearish": float(l_price_bearish),
-                "l_alt_bearish": float(l_alt_bearish),
-                "l_price_bullish": float(l_price_bullish),
-                "l_alt_bullish": float(l_alt_bullish),
-                "l_price_used": float(l_price_used),
-                "l_rule_used": l_rule_used,
+                "l_price": float(l_price),
                 "extreme_price": float(fractal_extreme_price),
                 "departure_extreme_price": float(departure_price),
                 "departure_extreme_time": datetime_to_iso(departure_time),
@@ -278,6 +248,11 @@ class SNRDetector(MarketElementDetector):
         )
         break_bar = self._bar_at_time(bars=bars, bar_time=break_time)
 
+        l_price = self._metadata_float(
+            element.metadata.get("l_price"),
+            fallback=(element.zone_high if role == ROLE_SUPPORT else element.zone_low),
+        )
+
         origin_fractal_id = str(element.metadata.get("origin_fractal_id") or "")
         origin_fractal = None
         if origin_fractal_id:
@@ -288,41 +263,6 @@ class SNRDetector(MarketElementDetector):
                 config=config,
             )
             origin_fractal = lookup.get(origin_fractal_id)
-
-        if origin_fractal is not None:
-            (
-                l_price_bearish,
-                l_alt_bearish,
-                l_price_bullish,
-                l_alt_bullish,
-            ) = self._line_bundle_from_fractal(origin_fractal)
-            fractal_extreme_price = self._metadata_float(
-                origin_fractal.metadata.get("extreme_price"),
-                fallback=self._fractal_extreme_fallback(origin_fractal),
-            )
-        else:
-            (
-                l_price_bearish,
-                l_alt_bearish,
-                l_price_bullish,
-                l_alt_bullish,
-            ) = self._line_bundle_from_snr_metadata(element=element, role=role)
-            fractal_extreme_price = self._metadata_float(
-                element.metadata.get("extreme_price"),
-                fallback=(element.zone_low if role == ROLE_SUPPORT else element.zone_high),
-            )
-
-        (
-            l_price_used,
-            l_alt_used,
-            l_rule_used,
-        ) = self._line_for_role(
-            role=role,
-            l_price_bearish=l_price_bearish,
-            l_alt_bearish=l_alt_bearish,
-            l_price_bullish=l_price_bullish,
-            l_alt_bullish=l_alt_bullish,
-        )
 
         range_start = self._metadata_time_or_none(
             element.metadata.get("departure_range_start_time")
@@ -351,11 +291,21 @@ class SNRDetector(MarketElementDetector):
                 fallback=break_time,
             )
 
+        fractal_extreme_price = self._metadata_float(
+            element.metadata.get("extreme_price"),
+            fallback=(origin_fractal.zone_high if origin_fractal is not None else element.zone_high),
+        )
+        if origin_fractal is not None:
+            fractal_extreme_price = self._metadata_float(
+                origin_fractal.metadata.get("extreme_price"),
+                fallback=fractal_extreme_price,
+            )
+
         if role == ROLE_SUPPORT:
             snr_low = float(departure_price)
-            snr_high = float(l_price_used)
+            snr_high = float(l_price)
         else:
-            snr_low = float(l_price_used)
+            snr_low = float(l_price)
             snr_high = float(departure_price)
 
         break_close = self._metadata_optional_float(element.metadata.get("break_close"))
@@ -373,14 +323,7 @@ class SNRDetector(MarketElementDetector):
         element.metadata["break_type"] = break_type
         element.metadata["break_time"] = datetime_to_iso(break_time)
         element.metadata["break_close"] = break_close
-        element.metadata["l_price"] = float(l_price_used)
-        element.metadata["l_alt_price"] = float(l_alt_used)
-        element.metadata["l_price_bearish"] = float(l_price_bearish)
-        element.metadata["l_alt_bearish"] = float(l_alt_bearish)
-        element.metadata["l_price_bullish"] = float(l_price_bullish)
-        element.metadata["l_alt_bullish"] = float(l_alt_bullish)
-        element.metadata["l_price_used"] = float(l_price_used)
-        element.metadata["l_rule_used"] = l_rule_used
+        element.metadata["l_price"] = float(l_price)
         element.metadata["extreme_price"] = float(fractal_extreme_price)
         element.metadata["departure_extreme_price"] = float(departure_price)
         element.metadata["departure_extreme_time"] = datetime_to_iso(departure_time)
@@ -424,17 +367,16 @@ class SNRDetector(MarketElementDetector):
     def _find_break(
         *,
         bars: Sequence[OHLCBar],
-        l_price_bearish: float,
-        l_price_bullish: float,
+        l_price: float,
         start_index: int,
     ) -> tuple[str, str, OHLCBar] | None:
         start = max(1, start_index)
         for index in range(start, len(bars)):
             previous_close = bars[index - 1].close
             current_close = bars[index].close
-            if current_close > l_price_bullish and previous_close <= l_price_bullish:
+            if current_close > l_price and previous_close <= l_price:
                 return ROLE_SUPPORT, BREAK_UP_CLOSE, bars[index]
-            if current_close < l_price_bearish and previous_close >= l_price_bearish:
+            if current_close < l_price and previous_close >= l_price:
                 return ROLE_RESISTANCE, BREAK_DOWN_CLOSE, bars[index]
         return None
 
@@ -490,107 +432,6 @@ class SNRDetector(MarketElementDetector):
         if mode == "confirm":
             return confirm_time
         return pivot_time
-
-    @staticmethod
-    def _fractal_extreme_fallback(fractal: TrackedElement) -> float:
-        fractal_type = str(fractal.metadata.get("fractal_type") or fractal.direction or "").strip().lower()
-        if fractal_type == FRACTAL_LOW:
-            return float(fractal.zone_low)
-        return float(fractal.zone_high)
-
-    def _line_bundle_from_fractal(
-        self,
-        fractal: TrackedElement,
-    ) -> tuple[float, float, float, float]:
-        fractal_type = str(fractal.metadata.get("fractal_type") or fractal.direction or "").strip().lower()
-        if fractal_type == FRACTAL_LOW:
-            legacy_l_fallback = float(fractal.zone_high)
-        else:
-            legacy_l_fallback = float(fractal.zone_low)
-
-        l_price_bearish = self._metadata_float(
-            fractal.metadata.get("l_price_bearish"),
-            fallback=self._metadata_float(fractal.metadata.get("l_price"), fallback=legacy_l_fallback),
-        )
-        l_alt_bearish = self._metadata_float(
-            fractal.metadata.get("l_alt_bearish"),
-            fallback=self._metadata_float(fractal.metadata.get("l_alt_price"), fallback=l_price_bearish),
-        )
-        l_price_bullish = self._metadata_float(
-            fractal.metadata.get("l_price_bullish"),
-            fallback=l_price_bearish,
-        )
-        l_alt_bullish = self._metadata_float(
-            fractal.metadata.get("l_alt_bullish"),
-            fallback=l_price_bullish,
-        )
-
-        return (
-            float(l_price_bearish),
-            float(l_alt_bearish),
-            float(l_price_bullish),
-            float(l_alt_bullish),
-        )
-
-    def _line_bundle_from_snr_metadata(
-        self,
-        *,
-        element: TrackedElement,
-        role: str,
-    ) -> tuple[float, float, float, float]:
-        legacy_l = self._metadata_float(
-            element.metadata.get("l_price"),
-            fallback=(element.zone_high if role == ROLE_SUPPORT else element.zone_low),
-        )
-        legacy_alt = self._metadata_float(
-            element.metadata.get("l_alt_price"),
-            fallback=legacy_l,
-        )
-
-        l_price_bearish = self._metadata_float(
-            element.metadata.get("l_price_bearish"),
-            fallback=legacy_l,
-        )
-        l_alt_bearish = self._metadata_float(
-            element.metadata.get("l_alt_bearish"),
-            fallback=legacy_alt,
-        )
-
-        l_price_used = self._metadata_float(
-            element.metadata.get("l_price_used"),
-            fallback=legacy_l,
-        )
-        l_rule_used = str(element.metadata.get("l_rule_used") or "").strip()
-
-        bullish_fallback = l_price_used if l_rule_used == L_RULE_BULLISH else legacy_l
-        l_price_bullish = self._metadata_float(
-            element.metadata.get("l_price_bullish"),
-            fallback=bullish_fallback,
-        )
-        l_alt_bullish = self._metadata_float(
-            element.metadata.get("l_alt_bullish"),
-            fallback=self._metadata_float(element.metadata.get("l_alt_price"), fallback=l_price_bullish),
-        )
-
-        return (
-            float(l_price_bearish),
-            float(l_alt_bearish),
-            float(l_price_bullish),
-            float(l_alt_bullish),
-        )
-
-    @staticmethod
-    def _line_for_role(
-        *,
-        role: str,
-        l_price_bearish: float,
-        l_alt_bearish: float,
-        l_price_bullish: float,
-        l_alt_bullish: float,
-    ) -> tuple[float, float, str]:
-        if role == ROLE_SUPPORT:
-            return float(l_price_bullish), float(l_alt_bullish), L_RULE_BULLISH
-        return float(l_price_bearish), float(l_alt_bearish), L_RULE_BEARISH
 
     def _sync_status_timestamps(self, element: TrackedElement) -> None:
         if element.touched_time is not None:

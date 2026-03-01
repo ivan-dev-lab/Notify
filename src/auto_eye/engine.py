@@ -118,6 +118,7 @@ class AutoEyeEngine:
                             bars=bars,
                             point_size=point_size,
                             existing=key_elements,
+                            drop_unmatched_snr=force_full_scan,
                         )
                         updated_key_elements = [
                             element
@@ -179,15 +180,22 @@ class AutoEyeEngine:
         bars: list,
         point_size: float,
         existing: list[TrackedElement],
+        drop_unmatched_snr: bool = False,
     ) -> list[TrackedElement]:
         key_result: list[TrackedElement] = []
 
         for detector_name, detector in self.detectors.items():
-            existing_by_id: dict[str, TrackedElement] = {
-                element.id: element
-                for element in existing
-                if element.element_type == detector_name
-            }
+            existing_items = [
+                element for element in existing if element.element_type == detector_name
+            ]
+            preserve_unmatched_existing = (
+                detector_name != "snr" or not drop_unmatched_snr
+            )
+            existing_by_id: dict[str, TrackedElement] = (
+                {element.id: element for element in existing_items}
+                if preserve_unmatched_existing
+                else {}
+            )
             detected = detector.detect(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -198,11 +206,14 @@ class AutoEyeEngine:
             for element in detected:
                 matched_id = self._find_matching_existing_id(
                     candidate=element,
-                    existing=list(existing_by_id.values()),
+                    existing=existing_items,
                 )
                 if matched_id is not None and matched_id != element.id:
                     element.id = matched_id
-                if element.id not in existing_by_id:
+                if preserve_unmatched_existing:
+                    if element.id not in existing_by_id:
+                        existing_by_id[element.id] = element
+                else:
                     existing_by_id[element.id] = element
 
             for element in existing_by_id.values():
@@ -228,7 +239,7 @@ class AutoEyeEngine:
     ) -> dict[str, object]:
         element_rows = [element.to_dict() for element in state.elements]
         return {
-            "generated_at_utc": now_utc.isoformat(),
+            "generated_at_utc": datetime_to_iso(now_utc),
             "source": "metatrader5",
             "symbols": symbols,
             "timeframes": timeframes,

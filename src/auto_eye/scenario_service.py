@@ -429,6 +429,7 @@ class ScenarioSnapshotBuilder:
         m5_confirmation = self._select_m5_confirmation(
             confirmations=self._collect_m5_confirmations(state_payload, trend_direction),
             min_signal_time=h1_anchor["start_dt"],
+            price=price,
         )
         if m5_confirmation is None:
             return None
@@ -510,6 +511,7 @@ class ScenarioSnapshotBuilder:
         m5_confirmation = self._select_m5_confirmation(
             confirmations=self._collect_m5_confirmations(state_payload, counter_direction),
             min_signal_time=counter_anchor["start_dt"],
+            price=price,
         )
         if m5_confirmation is None:
             return None
@@ -628,36 +630,16 @@ class ScenarioSnapshotBuilder:
         confirmation = scenario.get("ltf_confirmation")
         if not isinstance(confirmation, dict):
             confirmation = {}
-        entry = scenario.get("entry")
-        if not isinstance(entry, dict):
-            entry = {}
-        sl = scenario.get("sl")
-        if not isinstance(sl, dict):
-            sl = {}
-        tp = scenario.get("tp")
-        if not isinstance(tp, dict):
-            tp = {}
-
-        entry_zone = entry.get("zone") if isinstance(entry.get("zone"), list) else []
-        entry_low = ScenarioSnapshotBuilder._safe_float(entry_zone[0], fallback=0.0) if len(entry_zone) > 0 else 0.0
-        entry_high = ScenarioSnapshotBuilder._safe_float(entry_zone[1], fallback=0.0) if len(entry_zone) > 1 else 0.0
-
-        target_element = tp.get("target_element")
-        if not isinstance(target_element, dict):
-            target_element = {}
 
         seed = "|".join(
             [
                 str(scenario.get("symbol") or "").strip(),
                 str(scenario.get("scenario_type") or "").strip(),
                 str(scenario.get("direction") or "").strip(),
+                str(anchor.get("type") or "").strip(),
                 str(anchor.get("element_id") or "").strip(),
+                str(confirmation.get("type") or "").strip(),
                 str(confirmation.get("element_id") or "").strip(),
-                f"{entry_low:.10f}",
-                f"{entry_high:.10f}",
-                f"{ScenarioSnapshotBuilder._safe_float(sl.get('price'), fallback=0.0):.10f}",
-                f"{ScenarioSnapshotBuilder._safe_float(tp.get('price'), fallback=0.0):.10f}",
-                str(target_element.get("id") or "").strip(),
             ]
         )
         return hashlib.sha1(seed.encode("utf-8")).hexdigest()
@@ -852,44 +834,43 @@ class ScenarioSnapshotBuilder:
         *,
         confirmations: list[dict[str, Any]],
         min_signal_time: datetime,
+        price: float | None,
     ) -> dict[str, Any] | None:
-        eligible = [
-            item
-            for item in confirmations
-            if item["signal_dt"] >= min_signal_time
-        ]
+        eligible: list[dict[str, Any]] = []
+        for item in confirmations:
+            interaction_dt = item.get("interaction_dt")
+            start_dt = (
+                interaction_dt
+                if isinstance(interaction_dt, datetime)
+                else item["signal_dt"]
+            )
+            if start_dt < min_signal_time:
+                continue
+            candidate = dict(item)
+            candidate["start_dt"] = start_dt
+            eligible.append(candidate)
+
         if len(eligible) == 0:
             return None
+
         eligible = self._collapse_overlapping_snr(
             elements=eligible,
-            price=None,
+            price=price,
             prefer_smallest_zone=True,
         )
 
-        snr_candidates = [item for item in eligible if item["type"] == "snr"]
-        if len(snr_candidates) > 0:
-            min_size = min(item["zone_size"] for item in snr_candidates)
-            smallest = [
-                item
-                for item in snr_candidates
-                if abs(item["zone_size"] - min_size) <= 1e-12
-            ]
-            smallest.sort(
-                key=lambda item: (
-                    item["signal_dt"],
-                    item["id"],
-                )
-            )
-            return smallest[-1]
-
         eligible.sort(
             key=lambda item: (
-                item["signal_dt"],
+                0 if isinstance(item.get("interaction_dt"), datetime) else 1,
+                self._zone_distance_to_price(item=item, price=price),
+                item["zone_size"],
+                self._dt_sort_desc(item.get("start_dt")),
+                self._dt_sort_desc(item.get("signal_dt")),
                 item["id"],
                 item["label"],
             )
         )
-        return eligible[-1]
+        return eligible[0]
 
     def _collapse_overlapping_snr(
         self,

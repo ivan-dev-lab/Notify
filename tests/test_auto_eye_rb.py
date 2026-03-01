@@ -14,7 +14,7 @@ from config_loader import AutoEyeConfig
 
 from auto_eye.detectors.fractal import FractalDetector
 from auto_eye.detectors.rb import RBDetector
-from auto_eye.models import STATUS_BROKEN, OHLCBar, TrackedElement
+from auto_eye.models import STATUS_BROKEN, OHLCBar, TrackedElement, datetime_to_iso
 
 
 def build_config() -> AutoEyeConfig:
@@ -139,7 +139,7 @@ class RBDetectorTests(unittest.TestCase):
         self.rb.update_status(element=item, bars=bars, config=self.config)
         self.assertEqual(item.status, STATUS_BROKEN)
         self.assertEqual(item.metadata.get("broken_side"), "up")
-        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+        self.assertEqual(item.metadata.get("broken_time"), datetime_to_iso(bars[3].time))
 
     def test_rb_moves_to_broken_down_on_close_below_zone(self) -> None:
         bars = [
@@ -163,7 +163,7 @@ class RBDetectorTests(unittest.TestCase):
         self.rb.update_status(element=item, bars=bars, config=self.config)
         self.assertEqual(item.status, STATUS_BROKEN)
         self.assertEqual(item.metadata.get("broken_side"), "down")
-        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+        self.assertEqual(item.metadata.get("broken_time"), datetime_to_iso(bars[3].time))
 
     def test_rb_serialization_roundtrip(self) -> None:
         bars = [
@@ -211,7 +211,7 @@ class RBDetectorTests(unittest.TestCase):
         self.rb.update_status(element=item, bars=bars, config=self.config)
         self.assertEqual(item.status, STATUS_BROKEN)
         self.assertEqual(item.metadata.get("broken_side"), "up")
-        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+        self.assertEqual(item.metadata.get("broken_time"), datetime_to_iso(bars[3].time))
 
     def test_rb_bullish_breaks_on_wick_below_lower_border(self) -> None:
         bars = [
@@ -234,7 +234,7 @@ class RBDetectorTests(unittest.TestCase):
         self.rb.update_status(element=item, bars=bars, config=self.config)
         self.assertEqual(item.status, STATUS_BROKEN)
         self.assertEqual(item.metadata.get("broken_side"), "down")
-        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+        self.assertEqual(item.metadata.get("broken_time"), datetime_to_iso(bars[3].time))
 
 
 if __name__ == "__main__":

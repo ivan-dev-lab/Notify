@@ -143,6 +143,30 @@ AUTO_EYE_FORMATION_TIME_KEYS = (
     "c3_time_utc",
     "c3_time",
 )
+AUTO_EYE_H1_TIMEFRAME = "H1"
+AUTO_EYE_VALID_STATUSES = {
+    "fvg": {"active", "touched", "mitigated_partial"},
+    "snr": {"active", "retested"},
+    "rb": {"active"},
+}
+AUTO_EYE_MONITORED_H1_ELEMENTS = ("fvg", "snr", "rb")
+AUTO_EYE_NEAR_PRICE_RATIO = 0.0008
+AUTO_EYE_NEAR_ZONE_FACTOR = 0.5
+AUTO_EYE_NEAR_MIN_DISTANCE = 1e-6
+
+AUTO_EYE_INDEX_SPECS: dict[str, tuple[str, float]] = {
+    "GER40": ("EUR", 25.0),
+    "SPX500": ("USD", 50.0),
+    "NAS100": ("USD", 50.0),
+    "NDX100": ("USD", 50.0),
+}
+AUTO_EYE_CONTRACT_SIZES: dict[str, float] = {
+    "XAUUSD": 100.0,
+    "XAGUSD": 5000.0,
+    "BTCUSDT": 1.0,
+    "ETHUSDT": 1.0,
+}
+AUTO_EYE_DEFAULT_CONTRACT_SIZE = 100000.0
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +219,21 @@ class AutoEyeElementEvent:
     formation_time_utc: str | None
     zone_low: float | None
     zone_high: float | None
+    price: float
+    location: str
+    distance_to_zone: float
+    trend_direction: str
+    recommendation: str
+    trade_direction: str
+    entry_price: float
+    sl_price: float
+    tp_price: float | None
+    rr_ratio: float | None
+    profit_quote_per_lot: float | None
+    loss_quote_per_lot: float
+    quote_currency: str | None
+    tp_target_type: str | None
+    tp_target_id: str | None
 
 
 @dataclass
@@ -229,17 +268,20 @@ class AutoEyeSeenStore:
         with self.path.open("r", encoding="utf-8") as file:
             raw = json.load(file)
 
-        self.initialized = bool(raw.get("initialized", False))
-        raw_seen = raw.get("seen_ids", [])
-        if isinstance(raw_seen, list):
+        raw_active = raw.get("active_keys")
+        if isinstance(raw_active, list):
+            self.initialized = bool(raw.get("initialized", False))
             self.seen_ids = {
-                str(item).strip() for item in raw_seen if str(item).strip()
+                str(item).strip() for item in raw_active if str(item).strip()
             }
         else:
+            # Legacy format (seen_ids for "new elements") is not compatible with
+            # proximity alerts; bootstrap fresh active snapshot.
+            self.initialized = False
             self.seen_ids = set()
 
         logger.info(
-            "Loaded auto-eye notify store: initialized=%s seen=%s path=%s",
+            "Loaded auto-eye notify store: initialized=%s active=%s path=%s",
             self.initialized,
             len(self.seen_ids),
             self.path,
@@ -249,6 +291,7 @@ class AutoEyeSeenStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "initialized": self.initialized,
+            "active_keys": sorted(self.seen_ids),
             "seen_ids": sorted(self.seen_ids),
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
         }
@@ -263,13 +306,13 @@ class AutoEyeSeenStore:
             self.seen_ids = set(normalized)
             self.save()
             logger.info(
-                "Auto-eye notify store initialized with %s keys", len(self.seen_ids)
+                "Auto-eye notify store initialized with %s active keys", len(self.seen_ids)
             )
-            return set()
+            return set(normalized)
 
         new_keys = normalized - self.seen_ids
-        if new_keys:
-            self.seen_ids.update(new_keys)
+        if normalized != self.seen_ids:
+            self.seen_ids = set(normalized)
             self.save()
 
         return new_keys
@@ -956,47 +999,279 @@ def parse_auto_eye_zone(
     )
 
 
-def parse_auto_eye_event(
-    *,
-    symbol: str,
-    timeframe: str,
-    element_key: str,
-    raw_item: dict[str, object],
-) -> AutoEyeElementEvent | None:
-    element_id = str(raw_item.get("id") or "").strip()
-    if not element_id:
-        return None
-
-    direction = str(
-        raw_item.get("direction")
-        or raw_item.get("role")
-        or raw_item.get("fractal_type")
-        or raw_item.get("rb_type")
-        or ""
-    ).strip().lower()
-    status = str(raw_item.get("status") or "active").strip().lower()
-
-    formation_time_utc: str | None = None
+def parse_auto_eye_signal_time(raw_item: dict[str, object]) -> str | None:
     for key in AUTO_EYE_FORMATION_TIME_KEYS:
         value = str(raw_item.get(key) or "").strip()
         if value:
-            formation_time_utc = value
-            break
+            return value
+    return None
 
-    zone_low, zone_high = parse_auto_eye_zone(raw_item, element_key)
-    dedupe_key = f"{symbol}|{timeframe}|{element_key}|{element_id}"
 
-    return AutoEyeElementEvent(
-        dedupe_key=dedupe_key,
-        symbol=symbol,
-        timeframe=timeframe,
-        element_key=element_key,
-        element_id=element_id,
-        direction=direction,
-        status=status,
-        formation_time_utc=formation_time_utc,
-        zone_low=zone_low,
-        zone_high=zone_high,
+def parse_auto_eye_direction(
+    *,
+    element_key: str,
+    raw_item: dict[str, object],
+) -> str | None:
+    if element_key == "fvg":
+        direction = str(raw_item.get("direction") or "").strip().lower()
+        if direction in {"bullish", "bearish"}:
+            return direction
+        return None
+
+    if element_key == "snr":
+        role = str(raw_item.get("role") or "").strip().lower()
+        break_type = str(raw_item.get("break_type") or "").strip().lower()
+        if break_type == "break_up_close":
+            return "bullish"
+        if break_type == "break_down_close":
+            return "bearish"
+        if role == "support":
+            return "bullish"
+        if role == "resistance":
+            return "bearish"
+        return None
+
+    if element_key == "rb":
+        rb_type = str(raw_item.get("rb_type") or raw_item.get("direction") or "").strip().lower()
+        if rb_type == "low":
+            return "bullish"
+        if rb_type == "high":
+            return "bearish"
+        if rb_type in {"bullish", "bearish"}:
+            return rb_type
+        return None
+
+    return None
+
+
+def auto_eye_is_valid_h1_status(*, element_key: str, status: str) -> bool:
+    allowed = AUTO_EYE_VALID_STATUSES.get(element_key)
+    if allowed is None:
+        return False
+    return status in allowed
+
+
+def auto_eye_symbol_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+
+def resolve_quote_price_for_symbol(quotes: QuotesMap, symbol: str) -> float | None:
+    symbol_key = auto_eye_symbol_key(symbol)
+    for asset, quote in quotes.items():
+        if not isinstance(quote, dict):
+            continue
+        asset_key = auto_eye_symbol_key(asset)
+        pair_key = auto_eye_symbol_key(str(quote.get("pair") or ""))
+        if symbol_key not in {asset_key, pair_key}:
+            continue
+        price = parse_auto_eye_float(quote.get("value"))
+        if price is not None:
+            return price
+    return None
+
+
+def resolve_symbol_price(
+    *,
+    state: BotState,
+    symbol: str,
+    raw_payload: dict[str, object],
+) -> float | None:
+    quote_price = resolve_quote_price_for_symbol(state.last_quotes, symbol)
+    if quote_price is not None:
+        return quote_price
+
+    market = raw_payload.get("market")
+    if isinstance(market, dict):
+        return parse_auto_eye_float(market.get("price"))
+    return None
+
+
+def resolve_trend_direction(*, trend_dir: Path, symbol: str) -> str:
+    path = trend_dir / f"{symbol}.json"
+    if not path.exists():
+        return "neutral"
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except Exception:
+        return "neutral"
+    if not isinstance(payload, dict):
+        return "neutral"
+    trend = payload.get("trend")
+    if not isinstance(trend, dict):
+        return "neutral"
+    direction = str(trend.get("direction") or "").strip().lower()
+    if direction in {"bullish", "bearish", "neutral"}:
+        return direction
+    return "neutral"
+
+
+def auto_eye_near_threshold(*, price: float, zone_low: float, zone_high: float) -> float:
+    zone_size = max(0.0, abs(zone_high - zone_low))
+    by_zone = zone_size * AUTO_EYE_NEAR_ZONE_FACTOR
+    by_price = abs(price) * AUTO_EYE_NEAR_PRICE_RATIO
+    return max(AUTO_EYE_NEAR_MIN_DISTANCE, by_zone, by_price)
+
+
+def classify_price_location(
+    *,
+    price: float,
+    zone_low: float,
+    zone_high: float,
+) -> tuple[str | None, float]:
+    low = min(zone_low, zone_high)
+    high = max(zone_low, zone_high)
+    if low <= price <= high:
+        return "inside", 0.0
+
+    threshold = auto_eye_near_threshold(price=price, zone_low=low, zone_high=high)
+    if price < low:
+        distance = low - price
+        if distance <= threshold:
+            return "near_below", distance
+        return None, distance
+
+    distance = price - high
+    if distance <= threshold:
+        return "near_above", distance
+    return None, distance
+
+
+def parse_auto_eye_pair(symbol: str) -> tuple[str, str | None]:
+    normalized = auto_eye_symbol_key(symbol)
+    if normalized in AUTO_EYE_INDEX_SPECS:
+        quote, _ = AUTO_EYE_INDEX_SPECS[normalized]
+        return normalized, quote
+    if len(normalized) == 6 and normalized.isalpha():
+        return normalized[:3], normalized[3:]
+    if normalized.endswith("USDT"):
+        return normalized[:-4], "USDT"
+    if normalized.endswith("USD"):
+        return normalized[:-3], "USD"
+    return normalized, None
+
+
+def get_auto_eye_contract_size(symbol: str) -> float:
+    normalized = auto_eye_symbol_key(symbol)
+    if normalized in AUTO_EYE_INDEX_SPECS:
+        return AUTO_EYE_INDEX_SPECS[normalized][1]
+    return AUTO_EYE_CONTRACT_SIZES.get(normalized, AUTO_EYE_DEFAULT_CONTRACT_SIZE)
+
+
+def choose_nearest_h1_tp(
+    *,
+    entry_price: float,
+    trade_direction: str,
+    current_element_id: str,
+    targets: list[dict[str, object]],
+) -> tuple[float | None, str | None, str | None]:
+    best_level: float | None = None
+    best_type: str | None = None
+    best_id: str | None = None
+    best_distance: float | None = None
+
+    for target in targets:
+        target_id = str(target.get("id") or "").strip()
+        if not target_id or target_id == current_element_id:
+            continue
+
+        zone_low = parse_auto_eye_float(target.get("zone_low"))
+        zone_high = parse_auto_eye_float(target.get("zone_high"))
+        if zone_low is None or zone_high is None:
+            continue
+        low = min(zone_low, zone_high)
+        high = max(zone_low, zone_high)
+
+        if trade_direction == "long":
+            level = low
+            if level <= entry_price:
+                continue
+            distance = level - entry_price
+        else:
+            level = high
+            if level >= entry_price:
+                continue
+            distance = entry_price - level
+
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_level = level
+            best_type = str(target.get("element_key") or "").strip().lower()
+            best_id = target_id
+
+    return best_level, best_type, best_id
+
+
+def build_auto_eye_trade_plan(
+    *,
+    symbol: str,
+    entry_price: float,
+    zone_low: float,
+    zone_high: float,
+    direction: str,
+    current_element_id: str,
+    tp_targets: list[dict[str, object]],
+) -> dict[str, object]:
+    trade_direction = "long" if direction == "bullish" else "short"
+    low = min(zone_low, zone_high)
+    high = max(zone_low, zone_high)
+    sl_price = low if trade_direction == "long" else high
+    tp_price, tp_target_type, tp_target_id = choose_nearest_h1_tp(
+        entry_price=entry_price,
+        trade_direction=trade_direction,
+        current_element_id=current_element_id,
+        targets=tp_targets,
+    )
+
+    risk_abs = abs(entry_price - sl_price)
+    reward_abs = abs(tp_price - entry_price) if tp_price is not None else None
+    rr_ratio: float | None = None
+    if reward_abs is not None and risk_abs > 0:
+        rr_ratio = reward_abs / risk_abs
+
+    contract_size = get_auto_eye_contract_size(symbol)
+    _, quote_currency = parse_auto_eye_pair(symbol)
+
+    if trade_direction == "long":
+        loss_quote = max(0.0, (entry_price - sl_price) * contract_size)
+        profit_quote = (
+            max(0.0, (tp_price - entry_price) * contract_size)
+            if tp_price is not None
+            else None
+        )
+    else:
+        loss_quote = max(0.0, (sl_price - entry_price) * contract_size)
+        profit_quote = (
+            max(0.0, (entry_price - tp_price) * contract_size)
+            if tp_price is not None
+            else None
+        )
+
+    return {
+        "trade_direction": trade_direction,
+        "entry_price": entry_price,
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "rr_ratio": rr_ratio,
+        "profit_quote_per_lot": profit_quote,
+        "loss_quote_per_lot": loss_quote,
+        "quote_currency": quote_currency,
+        "tp_target_type": tp_target_type,
+        "tp_target_id": tp_target_id,
+    }
+
+
+def build_auto_eye_recommendation(*, trend_direction: str, zone_direction: str) -> str:
+    if trend_direction not in {"bullish", "bearish"}:
+        return (
+            "Тренд H1 нейтрален: ждите M5 реакцию; "
+            "для разворота дождитесь появления новой H1 опорной области."
+        )
+    if trend_direction == zone_direction:
+        return "Сделка по тренду: дождитесь M5 реакции в текущей H1 зоне."
+    return (
+        "Контртренд/разворот: дождитесь подтверждающей H1 опорной области "
+        "и только затем ищите M5 реакцию."
     )
 
 
@@ -1009,22 +1284,7 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
         logger.debug("Auto-eye state dir is missing: %s", state.auto_eye_state_dir)
         return []
 
-    configured_timeframes: list[str] = []
-    for raw_timeframe in config.timeframes:
-        normalized = normalize_auto_eye_timeframe(raw_timeframe)
-        if normalized and normalized not in configured_timeframes:
-            configured_timeframes.append(normalized)
-    if not configured_timeframes:
-        return []
-
-    configured_elements: list[str] = []
-    for raw_element in config.elements:
-        normalized_element = normalize_auto_eye_element_key(raw_element)
-        if normalized_element and normalized_element not in configured_elements:
-            configured_elements.append(normalized_element)
-    if not configured_elements:
-        return []
-
+    trend_dir = state.auto_eye_state_dir.parent / "Trends"
     events_by_key: dict[str, AutoEyeElementEvent] = {}
 
     for state_file in sorted(state.auto_eye_state_dir.glob("*.json")):
@@ -1042,39 +1302,169 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
             continue
 
         symbol = str(raw_payload.get("symbol") or state_file.stem).strip().upper()
+        price = resolve_symbol_price(state=state, symbol=symbol, raw_payload=raw_payload)
+        if price is None or price <= 0:
+            continue
+
+        trend_direction = resolve_trend_direction(trend_dir=trend_dir, symbol=symbol)
+
         raw_timeframes = raw_payload.get("timeframes")
         if not isinstance(raw_timeframes, dict):
             continue
+        raw_h1 = raw_timeframes.get(AUTO_EYE_H1_TIMEFRAME)
+        if not isinstance(raw_h1, dict):
+            continue
+        raw_elements_block = raw_h1.get("elements")
+        if not isinstance(raw_elements_block, dict):
+            continue
 
-        for timeframe in configured_timeframes:
-            raw_timeframe = raw_timeframes.get(timeframe)
-            if not isinstance(raw_timeframe, dict):
+        h1_zones: list[dict[str, object]] = []
+        for element_key in AUTO_EYE_MONITORED_H1_ELEMENTS:
+            raw_items = raw_elements_block.get(element_key)
+            if not isinstance(raw_items, list):
                 continue
 
-            raw_elements_block = raw_timeframe.get("elements")
-            if not isinstance(raw_elements_block, dict):
-                continue
-
-            for element_key in configured_elements:
-                raw_items = raw_elements_block.get(element_key)
-                if element_key == "fractals" and not isinstance(raw_items, list):
-                    raw_items = raw_elements_block.get("fractal")
-                if not isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
                     continue
+                element_id = str(raw_item.get("id") or "").strip()
+                if not element_id:
+                    continue
+                status = str(raw_item.get("status") or "").strip().lower()
+                if not auto_eye_is_valid_h1_status(element_key=element_key, status=status):
+                    continue
+                direction = parse_auto_eye_direction(element_key=element_key, raw_item=raw_item)
+                if direction not in {"bullish", "bearish"}:
+                    continue
+                zone_low, zone_high = parse_auto_eye_zone(raw_item, element_key)
+                if zone_low is None or zone_high is None:
+                    continue
+                signal_time_utc = parse_auto_eye_signal_time(raw_item)
+                h1_zones.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": AUTO_EYE_H1_TIMEFRAME,
+                        "element_key": element_key,
+                        "id": element_id,
+                        "direction": direction,
+                        "status": status,
+                        "zone_low": min(zone_low, zone_high),
+                        "zone_high": max(zone_low, zone_high),
+                        "formation_time_utc": signal_time_utc,
+                    }
+                )
 
-                for raw_item in raw_items:
-                    if not isinstance(raw_item, dict):
-                        continue
+        if len(h1_zones) == 0:
+            continue
 
-                    event = parse_auto_eye_event(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        element_key=element_key,
-                        raw_item=raw_item,
-                    )
-                    if event is None:
-                        continue
-                    events_by_key[event.dedupe_key] = event
+        best_event: AutoEyeElementEvent | None = None
+        for zone in h1_zones:
+            zone_low = float(zone["zone_low"])
+            zone_high = float(zone["zone_high"])
+            location, distance = classify_price_location(
+                price=price,
+                zone_low=zone_low,
+                zone_high=zone_high,
+            )
+            if location is None:
+                continue
+
+            recommendation = build_auto_eye_recommendation(
+                trend_direction=trend_direction,
+                zone_direction=str(zone["direction"]),
+            )
+            trade_plan = build_auto_eye_trade_plan(
+                symbol=symbol,
+                entry_price=price,
+                zone_low=zone_low,
+                zone_high=zone_high,
+                direction=str(zone["direction"]),
+                current_element_id=str(zone["id"]),
+                tp_targets=h1_zones,
+            )
+            dedupe_key = (
+                f"{symbol}|{AUTO_EYE_H1_TIMEFRAME}|{zone['element_key']}|{zone['id']}|{location}"
+            )
+
+            event = AutoEyeElementEvent(
+                dedupe_key=dedupe_key,
+                symbol=symbol,
+                timeframe=AUTO_EYE_H1_TIMEFRAME,
+                element_key=str(zone["element_key"]),
+                element_id=str(zone["id"]),
+                direction=str(zone["direction"]),
+                status=str(zone["status"]),
+                formation_time_utc=(
+                    str(zone.get("formation_time_utc"))
+                    if zone.get("formation_time_utc")
+                    else None
+                ),
+                zone_low=zone_low,
+                zone_high=zone_high,
+                price=price,
+                location=location,
+                distance_to_zone=distance,
+                trend_direction=trend_direction,
+                recommendation=recommendation,
+                trade_direction=str(trade_plan["trade_direction"]),
+                entry_price=float(trade_plan["entry_price"]),
+                sl_price=float(trade_plan["sl_price"]),
+                tp_price=(
+                    float(trade_plan["tp_price"])
+                    if isinstance(trade_plan["tp_price"], (int, float))
+                    else None
+                ),
+                rr_ratio=(
+                    float(trade_plan["rr_ratio"])
+                    if isinstance(trade_plan["rr_ratio"], (int, float))
+                    else None
+                ),
+                profit_quote_per_lot=(
+                    float(trade_plan["profit_quote_per_lot"])
+                    if isinstance(trade_plan["profit_quote_per_lot"], (int, float))
+                    else None
+                ),
+                loss_quote_per_lot=float(trade_plan["loss_quote_per_lot"]),
+                quote_currency=(
+                    str(trade_plan["quote_currency"])
+                    if trade_plan.get("quote_currency")
+                    else None
+                ),
+                tp_target_type=(
+                    str(trade_plan["tp_target_type"])
+                    if trade_plan.get("tp_target_type")
+                    else None
+                ),
+                tp_target_id=(
+                    str(trade_plan["tp_target_id"])
+                    if trade_plan.get("tp_target_id")
+                    else None
+                ),
+            )
+
+            if best_event is None:
+                best_event = event
+                continue
+
+            current_signal = parse_utc_iso(event.formation_time_utc or "")
+            best_signal = parse_utc_iso(best_event.formation_time_utc or "")
+            current_sort = (
+                0 if event.location == "inside" else 1,
+                event.distance_to_zone,
+                -(current_signal.timestamp() if current_signal else 0.0),
+                event.element_id,
+            )
+            best_sort = (
+                0 if best_event.location == "inside" else 1,
+                best_event.distance_to_zone,
+                -(best_signal.timestamp() if best_signal else 0.0),
+                best_event.element_id,
+            )
+            if current_sort < best_sort:
+                best_event = event
+
+        if best_event is not None:
+            events_by_key[best_event.dedupe_key] = best_event
 
     if not events_by_key:
         return []
@@ -1086,9 +1476,9 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
     new_events = [events_by_key[key] for key in new_keys if key in events_by_key]
     new_events.sort(
         key=lambda event: (
-            event.formation_time_utc or "",
             event.symbol,
-            event.timeframe,
+            event.location,
+            event.distance_to_zone,
             event.element_key,
             event.element_id,
         )
@@ -1100,48 +1490,81 @@ def auto_eye_direction_label(direction: str) -> str:
     mapping = {
         "bullish": "bullish",
         "bearish": "bearish",
-        "high": "high",
-        "low": "low",
         "support": "support",
         "resistance": "resistance",
     }
     return mapping.get(direction.lower(), direction)
 
 
+def auto_eye_location_label(event: AutoEyeElementEvent) -> str:
+    if event.location == "inside":
+        return "цена внутри зоны"
+    if event.location == "near_above":
+        return f"цена выше зоны, рядом ({format_target(event.distance_to_zone)})"
+    if event.location == "near_below":
+        return f"цена ниже зоны, рядом ({format_target(event.distance_to_zone)})"
+    return event.location
+
+
 def render_auto_eye_event_text(event: AutoEyeElementEvent) -> str:
-    element_label = AUTO_EYE_ELEMENT_LABELS.get(
-        event.element_key,
-        event.element_key.upper(),
+    element_label = AUTO_EYE_ELEMENT_LABELS.get(event.element_key, event.element_key.upper())
+    title = (
+        "<b>H1 опорная область: цена в зоне</b>"
+        if event.location == "inside"
+        else "<b>H1 опорная область: цена рядом</b>"
     )
 
     lines = [
-        "<b>Новый элемент Auto-Eye</b>",
+        title,
         f"<b>Актив:</b> <code>{html.escape(event.symbol)}</code>",
-        f"<b>TF:</b> <b>{html.escape(event.timeframe)}</b>",
-        f"<b>Тип:</b> <b>{html.escape(element_label)}</b>",
+        f"<b>Тренд H1:</b> <b>{html.escape(event.trend_direction)}</b>",
+        f"<b>Текущая цена:</b> <b>{format_target(event.price)}</b>",
+        f"<b>Местонахождение:</b> <b>{html.escape(auto_eye_location_label(event))}</b>",
+        f"<b>H1 зона:</b> <b>{html.escape(element_label)}</b> / <b>{html.escape(auto_eye_direction_label(event.direction))}</b>",
     ]
 
-    if event.direction:
-        lines.append(
-            f"<b>Направление:</b> <b>{html.escape(auto_eye_direction_label(event.direction))}</b>"
-        )
-
     if event.zone_low is not None and event.zone_high is not None:
-        if abs(event.zone_low - event.zone_high) < 1e-12:
-            lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_low)}</b>")
-        else:
-            lines.append(
-                f"<b>Зона:</b> <b>{format_target(event.zone_low)} - {format_target(event.zone_high)}</b>"
-            )
-    elif event.zone_low is not None:
-        lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_low)}</b>")
-    elif event.zone_high is not None:
-        lines.append(f"<b>Уровень:</b> <b>{format_target(event.zone_high)}</b>")
+        lines.append(
+            f"<b>Границы:</b> <b>{format_target(event.zone_low)} - {format_target(event.zone_high)}</b>"
+        )
 
     if event.formation_time_utc:
         lines.append(
-            "<b>Сформирован:</b> "
+            "<b>Сигнал зоны:</b> "
             f"<b>{html.escape(format_local_datetime(event.formation_time_utc))}</b>"
+        )
+
+    lines.append(f"<b>Рекомендация:</b> {html.escape(event.recommendation)}")
+
+    lines.append("")
+    lines.append("<b>Расчёт сделки (черновик)</b>")
+    lines.append(
+        f"<b>Направление:</b> <b>{'BUY' if event.trade_direction == 'long' else 'SELL'}</b>"
+    )
+    lines.append(f"<b>Entry:</b> <b>{format_target(event.entry_price)}</b>")
+    lines.append(f"<b>SL (за H1 зоной):</b> <b>{format_target(event.sl_price)}</b>")
+    if event.tp_price is not None:
+        lines.append(f"<b>TP (ближайший H1 RB/SNR/FVG):</b> <b>{format_target(event.tp_price)}</b>")
+    else:
+        lines.append("<b>TP (ближайший H1 RB/SNR/FVG):</b> <b>не найден</b>")
+
+    if event.rr_ratio is not None:
+        lines.append(f"<b>R:R:</b> <b>{event.rr_ratio:.2f}</b>")
+    if event.quote_currency:
+        quote = html.escape(event.quote_currency)
+        if event.profit_quote_per_lot is not None:
+            lines.append(
+                f"<b>Потенциал на 1 lot:</b> <b>{event.profit_quote_per_lot:.2f} {quote}</b>"
+            )
+        lines.append(
+            f"<b>Риск на 1 lot:</b> <b>{event.loss_quote_per_lot:.2f} {quote}</b>"
+        )
+
+    if event.tp_target_type and event.tp_target_id:
+        tp_type = AUTO_EYE_ELEMENT_LABELS.get(event.tp_target_type, event.tp_target_type.upper())
+        lines.append(
+            f"<b>TP-ориентир:</b> <b>{html.escape(tp_type)}</b> "
+            f"<code>{html.escape(event.tp_target_id)}</code>"
         )
 
     lines.append(f"<b>ID:</b> <code>{html.escape(event.element_id)}</code>")
@@ -5430,6 +5853,9 @@ def run(config_path: Path) -> None:
         ", ".join(config.telegram.auto_eye_notifications.timeframes),
         ", ".join(config.telegram.auto_eye_notifications.elements),
         auto_eye_seen_path,
+    )
+    logger.info(
+        "Auto-eye mode: H1 price proximity alerts with trend and trade draft (SL behind H1 zone, TP to nearest H1 RB/SNR/FVG)"
     )
     logger.info(
         "Backtest config: enabled=%s allowed=%s max_interval_hours=%s warmup_bars=%s max_proposals_to_send=%s decisions_log_file=%s",
