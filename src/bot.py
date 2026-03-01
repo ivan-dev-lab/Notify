@@ -1,4 +1,8 @@
-﻿from __future__ import annotations
+﻿# проблема: не всегда элементы есть в STATE
+# в целом норм, но следить за перекрытием SNR
+# использовать более актуальные опорные области - которые ближе всего к цене - сортировка
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -3156,6 +3160,115 @@ def load_jsonl_rows(path: Path) -> list[dict[str, object]]:
     return rows
 
 
+def resolve_backtest_log_path(config: AppConfig) -> Path:
+    raw_value = str(config.telegram.backtest.decisions_log_file).strip()
+    if not raw_value:
+        raw_value = "logs/backtest_decisions.log"
+    return resolve_output_path(raw_value)
+
+
+def format_backtest_event_line(event: dict[str, object]) -> str:
+    event_type = str(event.get("event") or "unknown").strip().lower()
+    time_utc = str(event.get("time_utc") or "")
+    time_local = format_local_datetime(time_utc) if time_utc else "unknown"
+
+    if event_type == "trend_changed":
+        trend = str(event.get("trend") or "").strip().lower()
+        return f"[{time_local}] trend_changed -> {trend or 'unknown'}"
+
+    if event_type == "scenario_created":
+        scenario_id = str(event.get("scenario_id") or "").strip()
+        scenario_type = str(event.get("scenario_type") or "").strip()
+        direction = str(event.get("direction") or "").strip()
+        return (
+            f"[{time_local}] scenario_created id={scenario_id or 'n/a'} "
+            f"type={scenario_type or 'n/a'} direction={direction or 'n/a'}"
+        )
+
+    if event_type == "scenario_expired":
+        scenario_id = str(event.get("scenario_id") or "").strip()
+        return f"[{time_local}] scenario_expired id={scenario_id or 'n/a'}"
+
+    if event_type == "symbol_skipped":
+        reason = str(event.get("reason") or "").strip()
+        m5_bars = str(event.get("m5_bars") or "")
+        h1_bars = str(event.get("h1_bars") or "")
+        return (
+            f"[{time_local}] symbol_skipped reason={reason or 'n/a'} "
+            f"m5_bars={m5_bars or 'n/a'} h1_bars={h1_bars or 'n/a'}"
+        )
+
+    if event_type == "h1_aggregated_from_m5":
+        h1_bars = str(event.get("h1_bars") or "")
+        return f"[{time_local}] h1_aggregated_from_m5 h1_bars={h1_bars or 'n/a'}"
+
+    return f"[{time_local}] {event_type}"
+
+
+def write_backtest_decision_log(
+    config: AppConfig,
+    *,
+    user_id: int,
+    asset: str,
+    start_utc: datetime,
+    end_utc: datetime,
+    report: object,
+    proposals: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> Path:
+    path = resolve_backtest_log_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    run_id = str(getattr(report, "run_id", "n/a"))
+    output_dir = str(getattr(report, "output_dir", ""))
+    steps_processed = int(getattr(report, "steps_processed", 0) or 0)
+    proposals_created = int(getattr(report, "proposals_created", 0) or 0)
+    scenarios_expired = int(getattr(report, "scenarios_expired", 0) or 0)
+    events_written = int(getattr(report, "events_written", 0) or 0)
+
+    lines: list[str] = []
+    lines.append("=" * 100)
+    lines.append(f"created_at_utc={datetime.now(timezone.utc).isoformat()}")
+    lines.append(f"run_id={run_id}")
+    lines.append(f"user_id={user_id}")
+    lines.append(f"asset={asset}")
+    lines.append(f"interval_utc={start_utc.isoformat()} -> {end_utc.isoformat()}")
+    lines.append(
+        "interval_local="
+        f"{format_local_datetime(start_utc.isoformat())} -> "
+        f"{format_local_datetime(end_utc.isoformat())}"
+    )
+    lines.append(f"output_dir={output_dir}")
+    lines.append(
+        f"summary: steps={steps_processed} proposals={proposals_created} "
+        f"expired={scenarios_expired} events={events_written}"
+    )
+
+    if len(proposals) > 0:
+        lines.append("proposals:")
+        for idx, proposal in enumerate(proposals, start=1):
+            scenario_id = str(proposal.get("scenario_id") or "").strip() or "n/a"
+            scenario_type = str(proposal.get("scenario_type") or "").strip() or "n/a"
+            direction = str(proposal.get("direction") or "").strip() or "n/a"
+            created_at = str(proposal.get("created_at_utc") or "")
+            lines.append(
+                f"  {idx}. id={scenario_id} type={scenario_type} "
+                f"direction={direction} created={created_at or 'n/a'}"
+            )
+
+    if len(events) > 0:
+        lines.append("events:")
+        for event in events:
+            lines.append(f"  {format_backtest_event_line(event)}")
+
+    lines.append("")
+
+    with path.open("a", encoding="utf-8") as file:
+        file.write("\n".join(lines))
+
+    return path
+
+
 def run_backtest_for_asset_sync(
     config: AppConfig,
     *,
@@ -3163,7 +3276,7 @@ def run_backtest_for_asset_sync(
     start_utc: datetime,
     end_utc: datetime,
     warmup_bars: int,
-) -> tuple[object, list[dict[str, object]]]:
+) -> tuple[object, list[dict[str, object]], list[dict[str, object]]]:
     from auto_eye.backtest_service import BacktestScenarioRunner
     from auto_eye.detectors.registry import build_detectors
 
@@ -3176,7 +3289,8 @@ def run_backtest_for_asset_sync(
         warmup_bars=warmup_bars,
     )
     proposals = load_jsonl_rows(report.output_dir / "proposals.jsonl")
-    return report, proposals
+    events = load_jsonl_rows(report.output_dir / "events.jsonl")
+    return report, proposals, events
 
 
 def format_backtest_price(value: object) -> str:
@@ -3230,6 +3344,26 @@ def render_backtest_proposal_text(
     return "\n".join(lines)
 
 
+async def _safe_send_backtest_message(
+    bot: Bot,
+    *,
+    user_id: int,
+    text: str,
+    context: str,
+) -> bool:
+    try:
+        await bot.send_message(chat_id=user_id, text=text)
+        return True
+    except Exception:
+        logger.warning(
+            "Backtest notification send failed user_id=%s context=%s",
+            user_id,
+            context,
+            exc_info=True,
+        )
+        return False
+
+
 async def execute_backtest_and_notify(
     bot: Bot,
     state: BotState,
@@ -3240,59 +3374,52 @@ async def execute_backtest_and_notify(
     end_utc: datetime,
 ) -> None:
     backtest_cfg = state.config.telegram.backtest
+    send_failed = False
+
+    async def send_text(text: str, *, context: str) -> None:
+        nonlocal send_failed
+        ok = await _safe_send_backtest_message(
+            bot,
+            user_id=user_id,
+            text=text,
+            context=context,
+        )
+        if not ok:
+            send_failed = True
 
     try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
+        await send_text(
+            (
                 "<b>Бектест запущен</b>\n"
                 f"<b>Актив:</b> <code>{html.escape(asset)}</code>\n"
                 f"<b>Период:</b> <b>{html.escape(format_local_datetime(start_utc.isoformat()))}</b>"
                 " - "
                 f"<b>{html.escape(format_local_datetime(end_utc.isoformat()))}</b>"
             ),
+            context="start",
         )
 
-        report, proposals = await asyncio.to_thread(
-            run_backtest_for_asset_sync,
+        async with state.scrape_lock:
+            report, proposals, events = await asyncio.to_thread(
+                run_backtest_for_asset_sync,
+                state.config,
+                asset=asset,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                warmup_bars=backtest_cfg.warmup_bars,
+            )
+
+        log_path = await asyncio.to_thread(
+            write_backtest_decision_log,
             state.config,
+            user_id=user_id,
             asset=asset,
             start_utc=start_utc,
             end_utc=end_utc,
-            warmup_bars=backtest_cfg.warmup_bars,
+            report=report,
+            proposals=proposals,
+            events=events,
         )
-
-        proposals.sort(key=lambda row: str(row.get("created_at_utc") or ""))
-        total = len(proposals)
-        max_send = max(1, backtest_cfg.max_proposals_to_send)
-        send_rows = proposals[:max_send]
-
-        if total == 0:
-            await bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "<b>Бектест завершен</b>\n"
-                    f"<code>{html.escape(asset)}</code>: возможных сценариев не найдено."
-                ),
-            )
-            return
-
-        for idx, row in enumerate(send_rows, start=1):
-            await bot.send_message(
-                chat_id=user_id,
-                text=render_backtest_proposal_text(row, index=idx, total=total),
-            )
-
-        omitted = total - len(send_rows)
-        summary = (
-            "<b>Бектест завершен</b>\n"
-            f"<b>Run ID:</b> <code>{html.escape(str(getattr(report, 'run_id', 'n/a')))}</code>\n"
-            f"<b>Найдено сценариев:</b> <b>{total}</b>"
-        )
-        if omitted > 0:
-            summary += f"\n<b>Показано:</b> {len(send_rows)} (скрыто: {omitted})"
-
-        await bot.send_message(chat_id=user_id, text=summary)
     except Exception:
         logger.exception(
             "Backtest task failed user_id=%s asset=%s start=%s end=%s",
@@ -3301,18 +3428,67 @@ async def execute_backtest_and_notify(
             start_utc.isoformat(),
             end_utc.isoformat(),
         )
-        with contextlib.suppress(Exception):
-            await bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "<b>Бектест завершился с ошибкой.</b>\n"
-                    "Проверьте логи и параметры периода."
-                ),
-            )
+        await send_text(
+            (
+                "<b>Бектест завершился с ошибкой.</b>\n"
+                "Проверьте логи и параметры периода."
+            ),
+            context="run_failed",
+        )
+        return
     finally:
         current = state.backtest_tasks.get(user_id)
         if current is asyncio.current_task():
             state.backtest_tasks.pop(user_id, None)
+
+    proposals.sort(key=lambda row: str(row.get("created_at_utc") or ""))
+    total = len(proposals)
+    max_send = max(1, backtest_cfg.max_proposals_to_send)
+    send_rows = proposals[:max_send]
+
+    if total == 0:
+        await send_text(
+            (
+                "<b>Бектест завершен</b>\n"
+                f"<code>{html.escape(asset)}</code>: возможных сценариев не найдено.\n"
+                f"<b>Лог решений:</b> <code>{html.escape(str(log_path))}</code>"
+            ),
+            context="no_proposals",
+        )
+        if send_failed:
+            logger.warning(
+                "Backtest completed with notification delivery issues user_id=%s asset=%s run_id=%s",
+                user_id,
+                asset,
+                getattr(report, "run_id", "n/a"),
+            )
+        return
+
+    for idx, row in enumerate(send_rows, start=1):
+        await send_text(
+            render_backtest_proposal_text(row, index=idx, total=total),
+            context=f"proposal_{idx}",
+        )
+
+    omitted = total - len(send_rows)
+    summary = (
+        "<b>Бектест завершен</b>\n"
+        f"<b>Run ID:</b> <code>{html.escape(str(getattr(report, 'run_id', 'n/a')))}</code>\n"
+        f"<b>Найдено сценариев:</b> <b>{total}</b>\n"
+        f"<b>Лог решений:</b> <code>{html.escape(str(log_path))}</code>"
+    )
+    if omitted > 0:
+        summary += f"\n<b>Показано:</b> {len(send_rows)} (скрыто: {omitted})"
+
+    await send_text(summary, context="summary")
+
+    if send_failed:
+        logger.warning(
+            "Backtest completed with notification delivery issues user_id=%s asset=%s run_id=%s",
+            user_id,
+            asset,
+            getattr(report, "run_id", "n/a"),
+        )
 
 
 async def start_backtest_task(
@@ -5256,12 +5432,13 @@ def run(config_path: Path) -> None:
         auto_eye_seen_path,
     )
     logger.info(
-        "Backtest config: enabled=%s allowed=%s max_interval_hours=%s warmup_bars=%s max_proposals_to_send=%s",
+        "Backtest config: enabled=%s allowed=%s max_interval_hours=%s warmup_bars=%s max_proposals_to_send=%s decisions_log_file=%s",
         config.telegram.backtest.enabled,
         ", ".join(str(user_id) for user_id in config.telegram.backtest.allowed_user_ids),
         config.telegram.backtest.max_interval_hours,
         config.telegram.backtest.warmup_bars,
         config.telegram.backtest.max_proposals_to_send,
+        resolve_backtest_log_path(config),
     )
 
     state = BotState(
@@ -5319,26 +5496,5 @@ def run(config_path: Path) -> None:
 if __name__ == "__main__":
     args = parse_args()
     run(args.config)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

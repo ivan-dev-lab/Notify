@@ -190,5 +190,52 @@ class RBDetectorTests(unittest.TestCase):
         )
 
 
+    def test_rb_bearish_breaks_on_wick_above_upper_border(self) -> None:
+        bars = [
+            make_bar(0, open_price=9.0, high_price=10.0, low_price=8.0, close_price=9.0),
+            make_bar(1, open_price=9.4, high_price=12.0, low_price=9.0, close_price=11.0),
+            make_bar(2, open_price=10.5, high_price=11.0, low_price=9.5, close_price=10.0),
+            # Upper wick breaks rb_high=12.0, close stays below 12.0.
+            make_bar(3, open_price=11.4, high_price=12.2, low_price=11.1, close_price=11.8),
+        ]
+        found = self.rb.detect(
+            symbol="EURUSD",
+            timeframe="M15",
+            bars=bars,
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(found), 1)
+        item = found[0]
+
+        self.rb.update_status(element=item, bars=bars, config=self.config)
+        self.assertEqual(item.status, STATUS_BROKEN)
+        self.assertEqual(item.metadata.get("broken_side"), "up")
+        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+
+    def test_rb_bullish_breaks_on_wick_below_lower_border(self) -> None:
+        bars = [
+            make_bar(0, open_price=10.0, high_price=10.5, low_price=9.8, close_price=10.0),
+            make_bar(1, open_price=9.9, high_price=10.0, low_price=8.0, close_price=8.5),
+            make_bar(2, open_price=8.6, high_price=9.2, low_price=8.4, close_price=8.9),
+            # Lower wick breaks rb_low=8.0, close stays above 8.0.
+            make_bar(3, open_price=8.2, high_price=8.9, low_price=7.9, close_price=8.1),
+        ]
+        found = self.rb.detect(
+            symbol="EURUSD",
+            timeframe="M15",
+            bars=bars,
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(found), 1)
+        item = found[0]
+
+        self.rb.update_status(element=item, bars=bars, config=self.config)
+        self.assertEqual(item.status, STATUS_BROKEN)
+        self.assertEqual(item.metadata.get("broken_side"), "down")
+        self.assertEqual(item.metadata.get("broken_time"), bars[3].time.isoformat())
+
+
 if __name__ == "__main__":
     unittest.main()

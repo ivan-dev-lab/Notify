@@ -169,11 +169,12 @@ class ScenarioSnapshotBuilder:
         now_utc: datetime,
     ) -> tuple[dict[str, Any], int, int]:
         active, history = self._extract_existing(existing_payload)
+        state_index = self._index_state_elements(state_payload)
 
         active, history, expired_count = self._expire_scenarios(
             active=active,
             history=history,
-            state_payload=state_payload,
+            state_index=state_index,
             now_utc=now_utc,
         )
 
@@ -192,6 +193,11 @@ class ScenarioSnapshotBuilder:
                 trend_direction=trend_direction,
                 now_utc=now_utc,
             ):
+                if self._scenario_has_missing_references(
+                    scenario=candidate,
+                    state_index=state_index,
+                ):
+                    continue
                 scenario_id = str(candidate.get("scenario_id") or "").strip()
                 if not scenario_id or scenario_id in known_ids:
                     continue
@@ -230,10 +236,9 @@ class ScenarioSnapshotBuilder:
         *,
         active: list[dict[str, Any]],
         history: list[dict[str, Any]],
-        state_payload: dict[str, Any],
+        state_index: dict[tuple[str, str], str],
         now_utc: datetime,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-        h1_index = self._index_h1_elements(state_payload)
         next_active: list[dict[str, Any]] = []
         next_history = list(history)
         expired_count = 0
@@ -246,7 +251,7 @@ class ScenarioSnapshotBuilder:
 
             expired_reason = self._is_scenario_expired(
                 scenario=scenario,
-                h1_index=h1_index,
+                state_index=state_index,
                 now_utc=now_utc,
             )
             if expired_reason is None:
@@ -270,14 +275,20 @@ class ScenarioSnapshotBuilder:
         self,
         *,
         scenario: dict[str, Any],
-        h1_index: dict[tuple[str, str], str],
+        state_index: dict[tuple[str, str], str],
         now_utc: datetime,
     ) -> str | None:
         expires_at = datetime_from_iso(str(scenario.get("expires_at_utc") or ""))
         if expires_at is not None and expires_at <= now_utc:
             return "time"
 
-        if self._anchor_became_invalid(scenario=scenario, h1_index=h1_index):
+        if self._scenario_has_missing_references(
+            scenario=scenario,
+            state_index=state_index,
+        ):
+            return "missing_state_element"
+
+        if self._anchor_became_invalid(scenario=scenario, state_index=state_index):
             return "anchor_invalidated"
 
         return None
@@ -286,7 +297,7 @@ class ScenarioSnapshotBuilder:
     def _anchor_became_invalid(
         *,
         scenario: dict[str, Any],
-        h1_index: dict[tuple[str, str], str],
+        state_index: dict[tuple[str, str], str],
     ) -> bool:
         anchor = scenario.get("htf_anchor")
         if not isinstance(anchor, dict):
@@ -297,20 +308,72 @@ class ScenarioSnapshotBuilder:
         if not anchor_type or not anchor_id:
             return False
 
-        status = h1_index.get((anchor_type, anchor_id))
+        status = state_index.get((anchor_type, anchor_id))
         if status is None:
             return False
         return status in INVALID_ANCHOR_STATUSES
 
-    def _index_h1_elements(self, state_payload: dict[str, Any]) -> dict[tuple[str, str], str]:
+    def _index_state_elements(self, state_payload: dict[str, Any]) -> dict[tuple[str, str], str]:
         index: dict[tuple[str, str], str] = {}
-        for element_type in ("fvg", "snr", "rb"):
-            for element in self._state_tf_elements(state_payload, H1, element_type):
-                parsed = self._normalize_element(H1, element_type, element)
-                if parsed is None:
-                    continue
-                index[(parsed["label"], parsed["id"])] = parsed["status"]
+        for timeframe in (H1, M5):
+            for element_type in ("fvg", "snr", "rb", "fractals"):
+                for element in self._state_tf_elements(state_payload, timeframe, element_type):
+                    parsed = self._normalize_element(timeframe, element_type, element)
+                    if parsed is None:
+                        continue
+                    index[(parsed["label"], parsed["id"])] = parsed["status"]
         return index
+
+    def _scenario_has_missing_references(
+        self,
+        *,
+        scenario: dict[str, Any],
+        state_index: dict[tuple[str, str], str],
+    ) -> bool:
+        required_pairs = [
+            self._extract_reference_pair(scenario.get("htf_anchor")),
+            self._extract_reference_pair(scenario.get("ltf_confirmation")),
+        ]
+        for pair in required_pairs:
+            if pair is None or pair not in state_index:
+                return True
+
+        tp = scenario.get("tp")
+        if isinstance(tp, dict):
+            target = self._extract_reference_pair(tp.get("target_element"))
+            if target is not None and target not in state_index:
+                return True
+
+        metadata = scenario.get("metadata")
+        if isinstance(metadata, dict):
+            opposite_touch = self._extract_reference_pair(metadata.get("opposite_touch"))
+            if opposite_touch is not None and opposite_touch not in state_index:
+                return True
+
+        evidence_ids = scenario.get("evidence_ids")
+        if isinstance(evidence_ids, list):
+            for raw_item in evidence_ids:
+                text = str(raw_item or "").strip()
+                if ":" not in text:
+                    continue
+                ref_type, ref_id = text.split(":", 1)
+                pair = (ref_type.strip().lower(), ref_id.strip())
+                if not pair[0] or not pair[1]:
+                    continue
+                if pair not in state_index:
+                    return True
+
+        return False
+
+    @staticmethod
+    def _extract_reference_pair(raw: object) -> tuple[str, str] | None:
+        if not isinstance(raw, dict):
+            return None
+        ref_type = str(raw.get("type") or "").strip().lower()
+        ref_id = str(raw.get("element_id") or raw.get("id") or "").strip()
+        if not ref_type or not ref_id:
+            return None
+        return ref_type, ref_id
 
     def _generate_scenarios(
         self,
@@ -768,15 +831,21 @@ class ScenarioSnapshotBuilder:
         if len(prepared) == 0:
             return None
 
+        prepared = self._collapse_overlapping_snr(
+            elements=prepared,
+            price=price,
+            prefer_smallest_zone=False,
+        )
         prepared.sort(
             key=lambda item: (
-                item["start_dt"],
-                -item["zone_size"],
-                item["signal_dt"],
+                self._zone_distance_to_price(item=item, price=price),
+                self._dt_sort_desc(item.get("start_dt")),
+                self._dt_sort_desc(item.get("signal_dt")),
+                item["zone_size"],
                 item["id"],
             )
         )
-        return prepared[-1]
+        return prepared[0]
 
     def _select_m5_confirmation(
         self,
@@ -791,6 +860,11 @@ class ScenarioSnapshotBuilder:
         ]
         if len(eligible) == 0:
             return None
+        eligible = self._collapse_overlapping_snr(
+            elements=eligible,
+            price=None,
+            prefer_smallest_zone=True,
+        )
 
         snr_candidates = [item for item in eligible if item["type"] == "snr"]
         if len(snr_candidates) > 0:
@@ -816,6 +890,73 @@ class ScenarioSnapshotBuilder:
             )
         )
         return eligible[-1]
+
+    def _collapse_overlapping_snr(
+        self,
+        *,
+        elements: list[dict[str, Any]],
+        price: float | None,
+        prefer_smallest_zone: bool,
+    ) -> list[dict[str, Any]]:
+        snr_items = [item for item in elements if item.get("type") == "snr"]
+        if len(snr_items) <= 1:
+            return elements
+
+        non_snr = [item for item in elements if item.get("type") != "snr"]
+        if prefer_smallest_zone:
+            snr_items.sort(
+                key=lambda item: (
+                    item["zone_size"],
+                    self._dt_sort_desc(item.get("signal_dt")),
+                    self._zone_distance_to_price(item=item, price=price),
+                    item["id"],
+                )
+            )
+        else:
+            snr_items.sort(
+                key=lambda item: (
+                    self._zone_distance_to_price(item=item, price=price),
+                    self._dt_sort_desc(item.get("start_dt")),
+                    self._dt_sort_desc(item.get("signal_dt")),
+                    item["zone_size"],
+                    item["id"],
+                )
+            )
+
+        selected: list[dict[str, Any]] = []
+        for candidate in snr_items:
+            if any(
+                self._zones_overlap(candidate, existing)
+                for existing in selected
+            ):
+                continue
+            selected.append(candidate)
+
+        return [*non_snr, *selected]
+
+    @staticmethod
+    def _zones_overlap(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        first_low = float(first["zone_low"])
+        first_high = float(first["zone_high"])
+        second_low = float(second["zone_low"])
+        second_high = float(second["zone_high"])
+        return min(first_high, second_high) >= max(first_low, second_low)
+
+    @staticmethod
+    def _zone_distance_to_price(*, item: dict[str, Any], price: float | None) -> float:
+        if price is None:
+            return 0.0
+        low = float(item["zone_low"])
+        high = float(item["zone_high"])
+        if low <= price <= high:
+            return 0.0
+        return min(abs(price - low), abs(price - high))
+
+    @staticmethod
+    def _dt_sort_desc(value: object) -> float:
+        if isinstance(value, datetime):
+            return -value.timestamp()
+        return float("inf")
 
     @staticmethod
     def _interaction_time(

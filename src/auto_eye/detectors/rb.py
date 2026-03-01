@@ -136,12 +136,14 @@ class RBDetector(MarketElementDetector):
                 continue
             if status != STATUS_ACTIVE:
                 break
-            if bar.close > rb_high:
+
+            if rb_type == FRACTAL_HIGH and (bar.close > rb_high or bar.high > rb_high):
                 status = RB_STATUS_BROKEN
                 broken_time = bar.time
                 broken_side = "up"
                 break
-            if bar.close < rb_low:
+
+            if rb_type == FRACTAL_LOW and (bar.close < rb_low or bar.low < rb_low):
                 status = RB_STATUS_BROKEN
                 broken_time = bar.time
                 broken_side = "down"

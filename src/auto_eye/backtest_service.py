@@ -77,6 +77,8 @@ class BacktestScenarioRunner:
         proposals_path = output_dir / "proposals.jsonl"
         events_path = output_dir / "events.jsonl"
         summary_path = output_dir / "summary.json"
+        state_output_dir = output_dir / "State"
+        state_output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(
             "Backtest started: run_id=%s symbols=%s start=%s end=%s",
@@ -92,6 +94,7 @@ class BacktestScenarioRunner:
         steps_processed = 0
         proposals_created = 0
         scenarios_expired = 0
+        state_snapshots_written = 0
 
         self.source.connect()
         try:
@@ -109,6 +112,12 @@ class BacktestScenarioRunner:
                     scenarios_expired += report["scenarios_expired"]
                     all_proposals.extend(report["proposals"])
                     all_events.extend(report["events"])
+
+                    last_state_payload = report.get("last_state_payload")
+                    if isinstance(last_state_payload, dict):
+                        state_path = state_output_dir / f"{symbol}.json"
+                        self._write_json(state_path, last_state_payload)
+                        state_snapshots_written += 1
                 except Exception as error:  # pragma: no cover - runtime safety
                     errors.append(f"{symbol}: {error}")
                     logger.exception("Backtest failed for %s", symbol)
@@ -129,6 +138,7 @@ class BacktestScenarioRunner:
             "proposals_created": proposals_created,
             "scenarios_expired": scenarios_expired,
             "events_written": len(all_events),
+            "state_snapshots_written": state_snapshots_written,
             "errors": errors,
         }
         with summary_path.open("w", encoding="utf-8") as file:
@@ -168,21 +178,30 @@ class BacktestScenarioRunner:
         warmup_start_m5 = start_time_utc - timedelta(seconds=m5_seconds * max(3, warmup_bars))
         warmup_start_h1 = start_time_utc - timedelta(seconds=h1_seconds * max(3, warmup_bars // 12))
 
-        m5_bars = self.source.fetch_range(
+        m5_bars = self._fetch_backtest_bars(
             symbol=symbol,
             timeframe_code="M5",
-            start_time_utc=warmup_start_m5,
+            warmup_start_utc=warmup_start_m5,
+            start_time_utc=start_time_utc,
             end_time_utc=end_time_utc,
         )
-        h1_bars = self.source.fetch_range(
+        h1_bars = self._fetch_backtest_bars(
             symbol=symbol,
             timeframe_code="H1",
-            start_time_utc=warmup_start_h1,
+            warmup_start_utc=warmup_start_h1,
+            start_time_utc=start_time_utc,
             end_time_utc=end_time_utc,
         )
 
         if m5_bars is None or h1_bars is None:
             raise RuntimeError("MT5 returned None for requested backtest range")
+
+        h1_aggregated_from_m5 = False
+        if len(h1_bars) < 3 and len(m5_bars) >= 12:
+            aggregated = self._aggregate_h1_from_m5(m5_bars)
+            if len(aggregated) >= 3:
+                h1_bars = aggregated
+                h1_aggregated_from_m5 = True
 
         if len(m5_bars) < 3 or len(h1_bars) < 3:
             return {
@@ -198,8 +217,13 @@ class BacktestScenarioRunner:
                         "reason": "not_enough_bars",
                         "m5_bars": len(m5_bars),
                         "h1_bars": len(h1_bars),
+                        "warmup_start_m5_utc": datetime_to_iso(warmup_start_m5),
+                        "warmup_start_h1_utc": datetime_to_iso(warmup_start_h1),
+                        "start_time_utc": datetime_to_iso(start_time_utc),
+                        "end_time_utc": datetime_to_iso(end_time_utc),
                     }
                 ],
+                "last_state_payload": None,
             }
 
         point_size = self.source.get_point_size(symbol)
@@ -209,9 +233,21 @@ class BacktestScenarioRunner:
         h1_index = -1
         steps_processed = 0
         proposals_created = 0
+        last_state_payload: dict[str, Any] | None = None
         scenarios_expired = 0
         proposals: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
+
+        if h1_aggregated_from_m5:
+            events.append(
+                {
+                    "event": "h1_aggregated_from_m5",
+                    "run_id": run_id,
+                    "symbol": symbol,
+                    "time_utc": datetime_to_iso(start_time_utc),
+                    "h1_bars": len(h1_bars),
+                }
+            )
 
         for idx, m5_bar in enumerate(m5_bars):
             step_time = m5_bar.time
@@ -237,6 +273,7 @@ class BacktestScenarioRunner:
                 point_size=point_size,
                 now_utc=step_time,
             )
+            last_state_payload = state_payload
             trend_payload = self._build_trend_snapshot(
                 symbol=symbol,
                 state_payload=state_payload,
@@ -270,8 +307,29 @@ class BacktestScenarioRunner:
             new_history = self._index_by_id(next_payload.get("history"))
 
             created_ids = [scenario_id for scenario_id in new_active if scenario_id not in old_active_ids]
+            state_ref_index = self._state_reference_index(state_payload)
             for scenario_id in created_ids:
                 scenario = new_active[scenario_id]
+                missing_refs = self._missing_scenario_references(
+                    scenario=scenario,
+                    state_ref_index=state_ref_index,
+                )
+                if len(missing_refs) > 0:
+                    events.append(
+                        {
+                            "event": "scenario_skipped_missing_state_refs",
+                            "run_id": run_id,
+                            "symbol": symbol,
+                            "time_utc": datetime_to_iso(step_time),
+                            "scenario_id": scenario_id,
+                            "missing_refs": [
+                                {"type": ref_type, "id": ref_id}
+                                for ref_type, ref_id in missing_refs
+                            ],
+                        }
+                    )
+                    continue
+
                 proposals_created += 1
                 proposals.append(self._proposal_record(run_id=run_id, symbol=symbol, scenario=scenario))
                 events.append(
@@ -314,7 +372,113 @@ class BacktestScenarioRunner:
             "scenarios_expired": scenarios_expired,
             "proposals": proposals,
             "events": events,
+            "last_state_payload": last_state_payload,
         }
+
+    def _fetch_backtest_bars(
+        self,
+        *,
+        symbol: str,
+        timeframe_code: str,
+        warmup_start_utc: datetime,
+        start_time_utc: datetime,
+        end_time_utc: datetime,
+    ) -> list[OHLCBar] | None:
+        bars = self.source.fetch_range(
+            symbol=symbol,
+            timeframe_code=timeframe_code,
+            start_time_utc=warmup_start_utc,
+            end_time_utc=end_time_utc,
+        )
+        if bars is None:
+            return None
+        if len(bars) >= 3:
+            return bars
+
+        direct = self.source.fetch_range(
+            symbol=symbol,
+            timeframe_code=timeframe_code,
+            start_time_utc=start_time_utc,
+            end_time_utc=end_time_utc,
+        )
+        if direct is None:
+            return None
+        if len(direct) > len(bars):
+            logger.info(
+                "Backtest fallback to direct range used: symbol=%s tf=%s warmup_bars=%s direct_bars=%s",
+                symbol,
+                timeframe_code,
+                len(bars),
+                len(direct),
+            )
+            return direct
+        return bars
+
+    @staticmethod
+    def _aggregate_h1_from_m5(m5_bars: list[OHLCBar]) -> list[OHLCBar]:
+        if len(m5_bars) == 0:
+            return []
+
+        sorted_bars = sorted(m5_bars, key=lambda item: item.time)
+        aggregated: list[OHLCBar] = []
+
+        bucket_time: datetime | None = None
+        bucket_open = 0.0
+        bucket_high = 0.0
+        bucket_low = 0.0
+        bucket_close = 0.0
+        bucket_volume = 0
+
+        def flush_bucket() -> None:
+            nonlocal bucket_time, bucket_open, bucket_high, bucket_low, bucket_close, bucket_volume
+            if bucket_time is None:
+                return
+            aggregated.append(
+                OHLCBar(
+                    time=bucket_time,
+                    open=bucket_open,
+                    high=bucket_high,
+                    low=bucket_low,
+                    close=bucket_close,
+                    tick_volume=bucket_volume if bucket_volume > 0 else None,
+                )
+            )
+            bucket_time = None
+            bucket_open = 0.0
+            bucket_high = 0.0
+            bucket_low = 0.0
+            bucket_close = 0.0
+            bucket_volume = 0
+
+        for bar in sorted_bars:
+            hour_time = bar.time.replace(minute=0, second=0, microsecond=0)
+            if bucket_time is None:
+                bucket_time = hour_time
+                bucket_open = float(bar.open)
+                bucket_high = float(bar.high)
+                bucket_low = float(bar.low)
+                bucket_close = float(bar.close)
+                bucket_volume = int(bar.tick_volume or 0)
+                continue
+
+            if hour_time != bucket_time:
+                flush_bucket()
+                bucket_time = hour_time
+                bucket_open = float(bar.open)
+                bucket_high = float(bar.high)
+                bucket_low = float(bar.low)
+                bucket_close = float(bar.close)
+                bucket_volume = int(bar.tick_volume or 0)
+                continue
+
+            bucket_high = max(bucket_high, float(bar.high))
+            bucket_low = min(bucket_low, float(bar.low))
+            bucket_close = float(bar.close)
+            bucket_volume += int(bar.tick_volume or 0)
+
+        flush_bucket()
+        return aggregated
+
     def _build_state_snapshot(
         self,
         *,
@@ -721,6 +885,87 @@ class BacktestScenarioRunner:
         }
 
     @staticmethod
+    def _state_reference_index(state_payload: dict[str, Any]) -> set[tuple[str, str]]:
+        raw_timeframes = state_payload.get("timeframes")
+        if not isinstance(raw_timeframes, dict):
+            return set()
+
+        mapping = {
+            "fvg": "fvg",
+            "snr": "snr",
+            "rb": "rb",
+            "fractals": "fractal",
+            "fractal": "fractal",
+        }
+        index: set[tuple[str, str]] = set()
+        for timeframe, tf_payload in raw_timeframes.items():
+            if not isinstance(tf_payload, dict):
+                continue
+            tf_key = str(timeframe or "").strip().upper().lower()
+            if not tf_key:
+                continue
+            elements = tf_payload.get("elements")
+            if not isinstance(elements, dict):
+                continue
+            for raw_key, mapped in mapping.items():
+                raw_items = elements.get(raw_key)
+                if not isinstance(raw_items, list):
+                    continue
+                label = f"{tf_key}_{mapped}"
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    item_id = str(raw_item.get("id") or "").strip()
+                    if item_id:
+                        index.add((label, item_id))
+        return index
+
+    @staticmethod
+    def _extract_ref_pair(raw: object) -> tuple[str, str] | None:
+        if not isinstance(raw, dict):
+            return None
+        ref_type = str(raw.get("type") or "").strip().lower()
+        ref_id = str(raw.get("element_id") or raw.get("id") or "").strip()
+        if not ref_type or not ref_id:
+            return None
+        return ref_type, ref_id
+
+    @classmethod
+    def _missing_scenario_references(
+        cls,
+        *,
+        scenario: dict[str, Any],
+        state_ref_index: set[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        refs: list[tuple[str, str]] = []
+
+        htf = cls._extract_ref_pair(scenario.get("htf_anchor"))
+        if htf is not None:
+            refs.append(htf)
+
+        ltf = cls._extract_ref_pair(scenario.get("ltf_confirmation"))
+        if ltf is not None:
+            refs.append(ltf)
+
+        tp = scenario.get("tp")
+        if isinstance(tp, dict):
+            target = cls._extract_ref_pair(tp.get("target_element"))
+            if target is not None:
+                refs.append(target)
+
+        metadata = scenario.get("metadata")
+        if isinstance(metadata, dict):
+            opposite_touch = cls._extract_ref_pair(metadata.get("opposite_touch"))
+            if opposite_touch is not None:
+                refs.append(opposite_touch)
+
+        missing: list[tuple[str, str]] = []
+        for pair in refs:
+            if pair not in state_ref_index and pair not in missing:
+                missing.append(pair)
+        return missing
+
+    @staticmethod
     def _index_by_id(raw_items: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(raw_items, list):
             return {}
@@ -763,6 +1008,12 @@ class BacktestScenarioRunner:
         start_part = start_time_utc.strftime("%Y%m%dT%H%M%SZ")
         end_part = end_time_utc.strftime("%Y%m%dT%H%M%SZ")
         return f"{symbol_part}_{start_part}_{end_part}"
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

@@ -134,13 +134,13 @@ class SNRDetector(MarketElementDetector):
 
         if element.status != STATUS_INVALIDATED:
             for bar in future_bars:
-                if role == ROLE_SUPPORT and bar.close < snr_low:
+                if role == ROLE_SUPPORT and (bar.close < snr_low or bar.low < snr_low):
                     element.status = STATUS_INVALIDATED
                     if element.mitigated_time is None:
                         element.mitigated_time = bar.time
                     break
 
-                if role == ROLE_RESISTANCE and bar.close > snr_high:
+                if role == ROLE_RESISTANCE and (bar.close > snr_high or bar.high > snr_high):
                     element.status = STATUS_INVALIDATED
                     if element.mitigated_time is None:
                         element.mitigated_time = bar.time

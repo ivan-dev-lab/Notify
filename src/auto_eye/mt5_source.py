@@ -166,7 +166,99 @@ class MT5BarsSource:
             )
             return None
 
-        return self._parse_rates(raw_rates)
+        bars = self._parse_rates(raw_rates)
+        if len(bars) > 0:
+            return bars
+
+        fallback = self._fetch_range_fallback(
+            symbol=symbol,
+            timeframe_value=timeframe_value,
+            timeframe_code=timeframe_code,
+            from_utc=from_utc,
+            to_utc=to_utc,
+        )
+        if len(fallback) > 0:
+            return fallback
+
+        logger.warning(
+            "backtest copy_rates_range returned 0 bars for %s %s: from=%s to=%s",
+            symbol,
+            timeframe_code,
+            from_utc.isoformat(),
+            to_utc.isoformat(),
+        )
+        return []
+
+    def _fetch_range_fallback(
+        self,
+        *,
+        symbol: str,
+        timeframe_value: int,
+        timeframe_code: str,
+        from_utc: datetime,
+        to_utc: datetime,
+    ) -> list[OHLCBar]:
+        assert mt5 is not None
+
+        count = self._estimate_bar_count(
+            timeframe_code=timeframe_code,
+            from_utc=from_utc,
+            to_utc=to_utc,
+        )
+
+        raw_from = mt5.copy_rates_from(symbol, timeframe_value, to_utc, count)
+        if raw_from is not None:
+            from_bars = [
+                bar
+                for bar in self._parse_rates(raw_from)
+                if from_utc <= bar.time <= to_utc
+            ]
+            if len(from_bars) > 0:
+                logger.info(
+                    "backtest fallback copy_rates_from used for %s %s: bars=%s",
+                    symbol,
+                    timeframe_code,
+                    len(from_bars),
+                )
+                return from_bars
+
+        raw_pos = mt5.copy_rates_from_pos(symbol, timeframe_value, 0, count)
+        if raw_pos is None:
+            error_code, error_message = mt5.last_error()
+            logger.warning(
+                "backtest fallback copy_rates_from_pos returned None for %s %s: %s %s",
+                symbol,
+                timeframe_code,
+                error_code,
+                error_message,
+            )
+            return []
+
+        pos_bars = [
+            bar
+            for bar in self._parse_rates(raw_pos)
+            if from_utc <= bar.time <= to_utc
+        ]
+        if len(pos_bars) > 0:
+            logger.info(
+                "backtest fallback copy_rates_from_pos used for %s %s: bars=%s",
+                symbol,
+                timeframe_code,
+                len(pos_bars),
+            )
+        return pos_bars
+
+    @staticmethod
+    def _estimate_bar_count(
+        *,
+        timeframe_code: str,
+        from_utc: datetime,
+        to_utc: datetime,
+    ) -> int:
+        seconds = max(60, timeframe_to_seconds(timeframe_code))
+        span_seconds = max(0, int((to_utc - from_utc).total_seconds()))
+        estimate = (span_seconds // seconds) + 5
+        return max(200, min(50000, estimate + 100))
 
     def fetch_incremental(
         self,

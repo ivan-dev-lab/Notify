@@ -217,5 +217,41 @@ class FractalAndSNRDetectorTests(unittest.TestCase):
         self.assertIsNotNone(legacy.metadata.get("departure_extreme_time"))
 
 
+    def test_snr_invalidates_on_wick_break_without_close_break(self) -> None:
+        bars = [
+            make_bar(0, open_price=8.8, high_price=10.0, low_price=8.0, close_price=9.0),
+            make_bar(1, open_price=9.2, high_price=12.0, low_price=9.2, close_price=9.15),
+            make_bar(2, open_price=10.8, high_price=11.0, low_price=10.2, close_price=8.8),
+            make_bar(3, open_price=8.9, high_price=9.1, low_price=8.95, close_price=8.7),
+            make_bar(4, open_price=8.8, high_price=9.4, low_price=8.6, close_price=9.2),
+            make_bar(5, open_price=9.1, high_price=9.2, low_price=8.98, close_price=9.05),
+        ]
+        found = self.snr.detect(
+            symbol="EURUSD",
+            timeframe="M15",
+            bars=bars,
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(found), 1)
+        item = found[0]
+
+        # Close is above support border, but wick goes below it.
+        wick_break_bar = make_bar(
+            6,
+            open_price=9.05,
+            high_price=9.2,
+            low_price=8.94,
+            close_price=9.0,
+        )
+        self.snr.update_status(
+            element=item,
+            bars=[*bars, wick_break_bar],
+            config=self.config,
+        )
+        self.assertEqual(item.status, STATUS_INVALIDATED)
+        self.assertEqual(item.metadata.get("invalidated_time"), wick_break_bar.time.isoformat())
+
+
 if __name__ == "__main__":
     unittest.main()

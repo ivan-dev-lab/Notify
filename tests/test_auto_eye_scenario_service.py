@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -599,6 +600,218 @@ class ScenarioSnapshotBuilderTests(unittest.TestCase):
                 scenario["ltf_confirmation"]["element_id"],
                 "m5-fvg-after-retest",
             )
+
+
+    def test_expires_when_scenario_reference_missing_in_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "Speculator" / "output"
+            output_root.mkdir(parents=True, exist_ok=True)
+            config = build_config(output_root)
+
+            state_payload = {
+                "symbol": "SPX500",
+                "market": {"price": 101.0},
+                "timeframes": {
+                    "H1": {
+                        "elements": {
+                            "fvg": [
+                                {
+                                    "id": "h1-fvg-bull",
+                                    "direction": "bullish",
+                                    "status": "active",
+                                    "formation_time_utc": "2026-02-27T10:00:00+00:00",
+                                    "fvg_low": 100.0,
+                                    "fvg_high": 102.0,
+                                }
+                            ],
+                            "snr": [
+                                {
+                                    "id": "h1-snr-target",
+                                    "role": "resistance",
+                                    "status": "active",
+                                    "break_time_utc": "2026-02-27T08:00:00+00:00",
+                                    "snr_low": 103.0,
+                                    "snr_high": 104.0,
+                                }
+                            ],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                    "M5": {
+                        "elements": {
+                            "fvg": [
+                                {
+                                    "id": "m5-fvg-bull",
+                                    "direction": "bullish",
+                                    "status": "active",
+                                    "formation_time_utc": "2026-02-27T10:05:00+00:00",
+                                    "fvg_low": 100.8,
+                                    "fvg_high": 101.2,
+                                }
+                            ],
+                            "snr": [],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                },
+            }
+            write_state(config, "SPX500", state_payload)
+            write_trend(config, "SPX500", "bullish")
+
+            builder = ScenarioSnapshotBuilder(config=config)
+            first_report = builder.build_all()
+            self.assertEqual(first_report.scenarios_created, 1)
+
+            state_payload["timeframes"]["M5"]["elements"]["fvg"] = []
+            write_state(config, "SPX500", state_payload)
+
+            second_report = builder.build_all()
+            self.assertEqual(second_report.scenarios_expired, 1)
+
+            scenarios = read_scenarios(config, "SPX500")
+            self.assertEqual(len(scenarios["active"]), 0)
+            self.assertEqual(len(scenarios["history"]), 1)
+            self.assertEqual(scenarios["history"][0]["status"], "expired")
+            self.assertEqual(
+                scenarios["history"][0]["metadata"]["expired_reason"],
+                "missing_state_element",
+            )
+
+    def test_prefers_closest_h1_anchor_to_price(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "Speculator" / "output"
+            output_root.mkdir(parents=True, exist_ok=True)
+            config = build_config(output_root)
+
+            state_payload = {
+                "symbol": "SPX500",
+                "market": {"price": 103.0},
+                "timeframes": {
+                    "H1": {
+                        "elements": {
+                            "fvg": [],
+                            "snr": [
+                                {
+                                    "id": "h1-support-far-new",
+                                    "role": "support",
+                                    "status": "retested",
+                                    "break_time_utc": "2026-02-27T09:00:00+00:00",
+                                    "retest_time_utc": "2026-02-27T11:30:00+00:00",
+                                    "snr_low": 99.0,
+                                    "snr_high": 100.0,
+                                },
+                                {
+                                    "id": "h1-support-near-old",
+                                    "role": "support",
+                                    "status": "retested",
+                                    "break_time_utc": "2026-02-27T08:00:00+00:00",
+                                    "retest_time_utc": "2026-02-27T10:30:00+00:00",
+                                    "snr_low": 102.8,
+                                    "snr_high": 103.2,
+                                },
+                                {
+                                    "id": "h1-resistance-target",
+                                    "role": "resistance",
+                                    "status": "active",
+                                    "break_time_utc": "2026-02-27T07:00:00+00:00",
+                                    "snr_low": 104.0,
+                                    "snr_high": 105.0,
+                                },
+                            ],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                    "M5": {
+                        "elements": {
+                            "fvg": [
+                                {
+                                    "id": "m5-fvg-bull",
+                                    "direction": "bullish",
+                                    "status": "active",
+                                    "formation_time_utc": "2026-02-27T11:40:00+00:00",
+                                    "fvg_low": 102.9,
+                                    "fvg_high": 103.1,
+                                }
+                            ],
+                            "snr": [],
+                            "rb": [],
+                            "fractals": [],
+                        }
+                    },
+                },
+            }
+            write_state(config, "SPX500", state_payload)
+            write_trend(config, "SPX500", "bullish")
+
+            builder = ScenarioSnapshotBuilder(config=config)
+            report = builder.build_all()
+
+            self.assertEqual(report.scenarios_created, 1)
+            scenarios = read_scenarios(config, "SPX500")
+            scenario = scenarios["active"][0]
+            self.assertEqual(
+                scenario["htf_anchor"]["element_id"],
+                "h1-support-near-old",
+            )
+
+    def test_collapse_overlapping_snr_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "Speculator" / "output"
+            output_root.mkdir(parents=True, exist_ok=True)
+            config = build_config(output_root)
+            builder = ScenarioSnapshotBuilder(config=config)
+
+            base = datetime(2026, 2, 27, 10, 0, tzinfo=timezone.utc)
+            elements = [
+                {
+                    "id": "snr-overlap-old",
+                    "type": "snr",
+                    "zone_low": 100.0,
+                    "zone_high": 101.0,
+                    "zone_size": 1.0,
+                    "signal_dt": base,
+                    "start_dt": base,
+                },
+                {
+                    "id": "snr-overlap-new",
+                    "type": "snr",
+                    "zone_low": 100.2,
+                    "zone_high": 101.2,
+                    "zone_size": 1.0,
+                    "signal_dt": base.replace(hour=11),
+                    "start_dt": base.replace(hour=11),
+                },
+                {
+                    "id": "snr-standalone",
+                    "type": "snr",
+                    "zone_low": 103.0,
+                    "zone_high": 104.0,
+                    "zone_size": 1.0,
+                    "signal_dt": base,
+                    "start_dt": base,
+                },
+                {
+                    "id": "fvg-other",
+                    "type": "fvg",
+                    "zone_low": 100.5,
+                    "zone_high": 100.9,
+                    "zone_size": 0.4,
+                    "signal_dt": base,
+                    "start_dt": base,
+                },
+            ]
+
+            collapsed = builder._collapse_overlapping_snr(
+                elements=elements,
+                price=100.8,
+                prefer_smallest_zone=False,
+            )
+            snr_ids = {item["id"] for item in collapsed if item["type"] == "snr"}
+            self.assertSetEqual(snr_ids, {"snr-overlap-new", "snr-standalone"})
+
 if __name__ == "__main__":
     unittest.main()
 

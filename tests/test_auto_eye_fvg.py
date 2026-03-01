@@ -181,5 +181,33 @@ class FVGDetectorTests(unittest.TestCase):
         self.assertIsNotNone(updated.touched_time)
 
 
+    def test_boundary_wick_mitigates_full_even_with_touch_rule(self) -> None:
+        self.config.fill_rule = "touch"
+        bars = [
+            make_bar(0, open_price=9.4, high_price=10.0, low_price=9.0, close_price=9.8),
+            make_bar(1, open_price=9.8, high_price=10.4, low_price=9.6, close_price=10.2),
+            make_bar(2, open_price=11.1, high_price=11.4, low_price=11.0, close_price=11.3),
+            # Bullish FVG lower border (10.0) is broken by wick.
+            make_bar(3, open_price=10.8, high_price=11.0, low_price=9.95, close_price=10.6),
+        ]
+        detected = self.detector.detect(
+            symbol="EURUSD",
+            timeframe="M5",
+            bars=bars[:3],
+            point_size=0.0001,
+            config=self.config,
+        )
+        self.assertEqual(len(detected), 1)
+        element = detected[0]
+
+        updated = self.detector.update_status(
+            element=element,
+            bars=bars,
+            config=self.config,
+        )
+        self.assertEqual(updated.status, STATUS_MITIGATED_FULL)
+        self.assertIsNotNone(updated.mitigated_time)
+
+
 if __name__ == "__main__":
     unittest.main()

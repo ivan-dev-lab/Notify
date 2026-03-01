@@ -133,11 +133,20 @@ class FVGDetector(MarketElementDetector):
             if depth > max_depth:
                 max_depth = depth
 
-            if fill_rule in {"both", "full"} and self._is_fully_mitigated(
+            boundary_breached = self._is_boundary_breached(
                 direction=element.direction,
                 zone_low=element.zone_low,
                 zone_high=element.zone_high,
                 bar=bar,
+            )
+            if boundary_breached or (
+                fill_rule in {"both", "full"}
+                and self._is_fully_mitigated(
+                    direction=element.direction,
+                    zone_low=element.zone_low,
+                    zone_high=element.zone_high,
+                    bar=bar,
+                )
             ):
                 element.status = STATUS_MITIGATED_FULL
                 if element.mitigated_time is None:
@@ -313,6 +322,18 @@ class FVGDetector(MarketElementDetector):
         if direction == BULLISH:
             return bar.low <= zone_low
         return bar.high >= zone_high
+
+    @staticmethod
+    def _is_boundary_breached(
+        *,
+        direction: str,
+        zone_low: float,
+        zone_high: float,
+        bar: OHLCBar,
+    ) -> bool:
+        if direction == BULLISH:
+            return bar.low < zone_low
+        return bar.high > zone_high
 
     @staticmethod
     def _fill_depth(

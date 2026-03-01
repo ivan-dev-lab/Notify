@@ -47,6 +47,7 @@ class TelegramBacktestConfig:
     max_interval_hours: int
     warmup_bars: int
     max_proposals_to_send: int
+    decisions_log_file: str = "logs/backtest_decisions.log"
 
 
 @dataclass
@@ -329,6 +330,12 @@ def load_config(config_path: Path) -> AppConfig:
                 max_interval_hours=max(1, int(backtest_raw.get("max_interval_hours", 168))),
                 warmup_bars=max(50, int(backtest_raw.get("warmup_bars", 500))),
                 max_proposals_to_send=max(1, int(backtest_raw.get("max_proposals_to_send", 30))),
+                decisions_log_file=str(
+                    backtest_raw.get(
+                        "decisions_log_file",
+                        "logs/backtest_decisions.log",
+                    )
+                ).strip(),
             ),
         ),
         logging=LoggingConfig(
@@ -366,5 +373,4 @@ def load_config(config_path: Path) -> AppConfig:
             ),
         ),
     )
-
 
