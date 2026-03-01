@@ -1,7 +1,4 @@
-﻿# проблема: не всегда элементы есть в STATE
-# в целом норм, но следить за перекрытием SNR
-# использовать более актуальные опорные области - которые ближе всего к цене - сортировка
-
+﻿# плохо определяется SNR ==> невозможно построить нормальные сценарии 
 from __future__ import annotations
 
 import argparse
@@ -34,9 +31,18 @@ CALLBACK_MENU_ALERTS = "menu_alerts"
 CALLBACK_MENU_HOME = "menu_home"
 CALLBACK_MENU_DELETE = "menu_delete"
 CALLBACK_MENU_BACKTEST = "menu_backtest"
+CALLBACK_MENU_AUTO_EYE_NOTIFY = "menu_auto_eye_notify"
 CALLBACK_CANCEL = "cancel"
 CALLBACK_NOOP = "noop"
 CALLBACK_BACKTEST_CANCEL = "bt_cancel"
+CALLBACK_AEN_MENU_ASSETS = "aen_menu_assets"
+CALLBACK_AEN_MENU_ELEMENTS = "aen_menu_elements"
+CALLBACK_AEN_ASSET_PREFIX = "aen_a|"
+CALLBACK_AEN_ASSET_ALL = "aen_a_all"
+CALLBACK_AEN_ASSET_CLEAR = "aen_a_clear"
+CALLBACK_AEN_ELEMENT_PREFIX = "aen_e|"
+CALLBACK_AEN_ELEMENT_ALL = "aen_e_all"
+CALLBACK_AEN_ELEMENT_CLEAR = "aen_e_clear"
 
 CALLBACK_ALERT_ASSET_PREFIX = "alerts_asset|"
 CALLBACK_PRICE_SET_PREFIX = "price_set|"
@@ -135,6 +141,19 @@ AUTO_EYE_ELEMENT_LABELS = {
     "fractals": "Fractal",
     "rb": "RB",
 }
+AUTO_EYE_NOTIFY_MONITORED_ELEMENTS = ("fvg", "rb", "fractals")
+AUTO_EYE_NOTIFY_DEFAULT_ELEMENT = "fvg"
+AUTO_EYE_NOTIFY_ELEMENT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("fvg", "FVG"),
+    ("rb", "RB"),
+    ("fractal", "Fractal"),
+)
+AUTO_EYE_NOTIFY_EVENT_TO_SUBSCRIPTION_KEY = {
+    "fvg": "fvg",
+    "rb": "rb",
+    "fractal": "fractal",
+    "fractals": "fractal",
+}
 AUTO_EYE_FORMATION_TIME_KEYS = (
     "formation_time_utc",
     "formation_time",
@@ -148,8 +167,8 @@ AUTO_EYE_VALID_STATUSES = {
     "fvg": {"active", "touched", "mitigated_partial"},
     "snr": {"active", "retested"},
     "rb": {"active"},
+    "fractals": {"active"},
 }
-AUTO_EYE_MONITORED_H1_ELEMENTS = ("fvg", "snr", "rb")
 AUTO_EYE_NEAR_PRICE_RATIO = 0.0008
 AUTO_EYE_NEAR_ZONE_FACTOR = 0.5
 AUTO_EYE_NEAR_MIN_DISTANCE = 1e-6
@@ -214,26 +233,17 @@ class AutoEyeElementEvent:
     timeframe: str
     element_key: str
     element_id: str
-    direction: str
+    direction: str | None
     status: str
     formation_time_utc: str | None
     zone_low: float | None
     zone_high: float | None
-    price: float
-    location: str
-    distance_to_zone: float
-    trend_direction: str
-    recommendation: str
-    trade_direction: str
-    entry_price: float
-    sl_price: float
-    tp_price: float | None
-    rr_ratio: float | None
-    profit_quote_per_lot: float | None
-    loss_quote_per_lot: float
-    quote_currency: str | None
-    tp_target_type: str | None
-    tp_target_id: str | None
+
+
+@dataclass
+class AutoEyeUserNotificationPreference:
+    assets: set[str]
+    elements: set[str]
 
 
 @dataclass
@@ -249,6 +259,7 @@ class BotState:
     dashboard_message_ids: dict[int, tuple[int, int]]
     auto_eye_state_dir: Path
     auto_eye_seen_store: "AutoEyeSeenStore"
+    auto_eye_subscription_store: "AutoEyeSubscriptionStore"
     backtest_tasks: dict[int, asyncio.Task]
     periodic_task: asyncio.Task | None = None
 
@@ -316,6 +327,207 @@ class AutoEyeSeenStore:
             self.save()
 
         return new_keys
+
+
+class AutoEyeSubscriptionStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.preferences: dict[int, AutoEyeUserNotificationPreference] = {}
+        self.load()
+
+    def _default_preference(self) -> AutoEyeUserNotificationPreference:
+        return AutoEyeUserNotificationPreference(
+            assets=set(),
+            elements={AUTO_EYE_NOTIFY_DEFAULT_ELEMENT},
+        )
+
+    @staticmethod
+    def _normalize_element(value: object) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"fractal", "fractals"}:
+            return "fractal"
+        if normalized in {"fvg", "rb"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _normalize_assets(raw_assets: object) -> set[str]:
+        if not isinstance(raw_assets, list):
+            return set()
+        normalized: set[str] = set()
+        for item in raw_assets:
+            key = auto_eye_symbol_key(item)
+            if key:
+                normalized.add(key)
+        return normalized
+
+    def load(self) -> None:
+        if not self.path.exists():
+            logger.info(
+                "Auto-eye subscriptions store not found, starting empty: %s",
+                self.path,
+            )
+            return
+
+        try:
+            with self.path.open("r", encoding="utf-8") as file:
+                raw = json.load(file)
+        except Exception as error:
+            logger.warning(
+                "Failed to load auto-eye subscriptions store %s: %s",
+                self.path,
+                error,
+            )
+            return
+
+        raw_users = raw.get("users")
+        if not isinstance(raw_users, dict):
+            logger.warning(
+                "Auto-eye subscriptions format invalid in %s, expected users map",
+                self.path,
+            )
+            return
+
+        loaded: dict[int, AutoEyeUserNotificationPreference] = {}
+        for raw_user_id, raw_pref in raw_users.items():
+            try:
+                user_id = int(str(raw_user_id).strip())
+            except ValueError:
+                continue
+            if not isinstance(raw_pref, dict):
+                continue
+
+            assets = self._normalize_assets(raw_pref.get("assets", []))
+
+            raw_elements = raw_pref.get("elements")
+            if isinstance(raw_elements, list):
+                elements = {
+                    normalized
+                    for normalized in (
+                        self._normalize_element(item) for item in raw_elements
+                    )
+                    if normalized
+                }
+            else:
+                elements = {AUTO_EYE_NOTIFY_DEFAULT_ELEMENT}
+
+            loaded[user_id] = AutoEyeUserNotificationPreference(
+                assets=assets,
+                elements=elements,
+            )
+
+        self.preferences = loaded
+        logger.info(
+            "Loaded auto-eye subscriptions: users=%s path=%s",
+            len(self.preferences),
+            self.path,
+        )
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "users": {
+                str(user_id): {
+                    "assets": sorted(pref.assets),
+                    "elements": sorted(pref.elements),
+                }
+                for user_id, pref in sorted(self.preferences.items())
+            },
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+
+    def get(self, user_id: int) -> AutoEyeUserNotificationPreference:
+        pref = self.preferences.get(user_id)
+        if pref is None:
+            default_pref = self._default_preference()
+            return AutoEyeUserNotificationPreference(
+                assets=set(default_pref.assets),
+                elements=set(default_pref.elements),
+            )
+        return AutoEyeUserNotificationPreference(
+            assets=set(pref.assets),
+            elements=set(pref.elements),
+        )
+
+    def _set(self, user_id: int, pref: AutoEyeUserNotificationPreference) -> None:
+        self.preferences[user_id] = AutoEyeUserNotificationPreference(
+            assets=set(pref.assets),
+            elements=set(pref.elements),
+        )
+        self.save()
+
+    def toggle_asset(self, user_id: int, asset: str) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        asset_key = auto_eye_symbol_key(asset)
+        if not asset_key:
+            return pref
+        if asset_key in pref.assets:
+            pref.assets.remove(asset_key)
+        else:
+            pref.assets.add(asset_key)
+        self._set(user_id, pref)
+        return pref
+
+    def select_all_assets(
+        self,
+        user_id: int,
+        assets: list[str],
+    ) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        pref.assets = {
+            asset_key for asset_key in (auto_eye_symbol_key(asset) for asset in assets) if asset_key
+        }
+        self._set(user_id, pref)
+        return pref
+
+    def clear_assets(self, user_id: int) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        pref.assets = set()
+        self._set(user_id, pref)
+        return pref
+
+    def toggle_element(self, user_id: int, element_key: str) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        normalized = self._normalize_element(element_key)
+        if normalized is None:
+            return pref
+        if normalized in pref.elements:
+            pref.elements.remove(normalized)
+        else:
+            pref.elements.add(normalized)
+        self._set(user_id, pref)
+        return pref
+
+    def select_all_elements(self, user_id: int) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        pref.elements = {key for key, _ in AUTO_EYE_NOTIFY_ELEMENT_OPTIONS}
+        self._set(user_id, pref)
+        return pref
+
+    def clear_elements(self, user_id: int) -> AutoEyeUserNotificationPreference:
+        pref = self.get(user_id)
+        pref.elements = set()
+        self._set(user_id, pref)
+        return pref
+
+    def is_event_enabled_for_user(self, *, user_id: int, event: AutoEyeElementEvent) -> bool:
+        pref = self.get(user_id)
+        if not pref.assets or not pref.elements:
+            return False
+
+        event_asset_key = auto_eye_symbol_key(event.symbol)
+        if event_asset_key not in pref.assets and not any(
+            event_asset_key.startswith(asset_key) or asset_key.startswith(event_asset_key)
+            for asset_key in pref.assets
+        ):
+            return False
+
+        event_element_key = normalize_auto_eye_notify_element(event.element_key)
+        if event_element_key is None:
+            return False
+        return event_element_key in pref.elements
 
 
 class AlertStore:
@@ -939,6 +1151,11 @@ def normalize_auto_eye_element_key(value: str) -> str | None:
     return AUTO_EYE_ELEMENT_KEY_MAP.get(normalized)
 
 
+def normalize_auto_eye_notify_element(value: str) -> str | None:
+    normalized = str(value).strip().lower()
+    return AUTO_EYE_NOTIFY_EVENT_TO_SUBSCRIPTION_KEY.get(normalized)
+
+
 def resolve_auto_eye_state_dir(config: AppConfig) -> Path:
     custom_state_dir = str(config.telegram.auto_eye_notifications.state_dir).strip()
     if custom_state_dir:
@@ -949,6 +1166,13 @@ def resolve_auto_eye_state_dir(config: AppConfig) -> Path:
 
     auto_eye_output_path = resolve_output_path(config.auto_eye.output_json)
     return ensure_exchange_structure(auto_eye_output_path)["state"]
+
+
+def resolve_auto_eye_subscriptions_path(config: AppConfig) -> Path:
+    raw_path = str(config.telegram.auto_eye_notifications.subscriptions_json).strip()
+    if not raw_path:
+        raw_path = "output/auto_eye_user_subscriptions.json"
+    return resolve_output_path(raw_path)
 
 
 def parse_auto_eye_float(value: object) -> float | None:
@@ -1039,6 +1263,18 @@ def parse_auto_eye_direction(
             return "bearish"
         if rb_type in {"bullish", "bearish"}:
             return rb_type
+        return None
+
+    if element_key == "fractals":
+        fractal_type = str(
+            raw_item.get("fractal_type") or raw_item.get("direction") or ""
+        ).strip().lower()
+        if fractal_type == "low":
+            return "bullish"
+        if fractal_type == "high":
+            return "bearish"
+        if fractal_type in {"bullish", "bearish"}:
+            return fractal_type
         return None
 
     return None
@@ -1284,7 +1520,16 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
         logger.debug("Auto-eye state dir is missing: %s", state.auto_eye_state_dir)
         return []
 
-    trend_dir = state.auto_eye_state_dir.parent / "Trends"
+    notification_timeframes = {
+        normalize_auto_eye_timeframe(value) for value in config.timeframes if str(value).strip()
+    }
+    if not notification_timeframes:
+        notification_timeframes = {AUTO_EYE_H1_TIMEFRAME}
+
+    monitored_elements = list(AUTO_EYE_NOTIFY_MONITORED_ELEMENTS)
+    if not monitored_elements:
+        return []
+
     events_by_key: dict[str, AutoEyeElementEvent] = {}
 
     for state_file in sorted(state.auto_eye_state_dir.glob("*.json")):
@@ -1302,169 +1547,67 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
             continue
 
         symbol = str(raw_payload.get("symbol") or state_file.stem).strip().upper()
-        price = resolve_symbol_price(state=state, symbol=symbol, raw_payload=raw_payload)
-        if price is None or price <= 0:
-            continue
-
-        trend_direction = resolve_trend_direction(trend_dir=trend_dir, symbol=symbol)
-
         raw_timeframes = raw_payload.get("timeframes")
         if not isinstance(raw_timeframes, dict):
             continue
-        raw_h1 = raw_timeframes.get(AUTO_EYE_H1_TIMEFRAME)
-        if not isinstance(raw_h1, dict):
-            continue
-        raw_elements_block = raw_h1.get("elements")
-        if not isinstance(raw_elements_block, dict):
-            continue
 
-        h1_zones: list[dict[str, object]] = []
-        for element_key in AUTO_EYE_MONITORED_H1_ELEMENTS:
-            raw_items = raw_elements_block.get(element_key)
-            if not isinstance(raw_items, list):
+        for timeframe_name, raw_timeframe in raw_timeframes.items():
+            timeframe = normalize_auto_eye_timeframe(timeframe_name)
+            if timeframe not in notification_timeframes:
+                continue
+            if not isinstance(raw_timeframe, dict):
                 continue
 
-            for raw_item in raw_items:
-                if not isinstance(raw_item, dict):
-                    continue
-                element_id = str(raw_item.get("id") or "").strip()
-                if not element_id:
-                    continue
-                status = str(raw_item.get("status") or "").strip().lower()
-                if not auto_eye_is_valid_h1_status(element_key=element_key, status=status):
-                    continue
-                direction = parse_auto_eye_direction(element_key=element_key, raw_item=raw_item)
-                if direction not in {"bullish", "bearish"}:
-                    continue
-                zone_low, zone_high = parse_auto_eye_zone(raw_item, element_key)
-                if zone_low is None or zone_high is None:
-                    continue
-                signal_time_utc = parse_auto_eye_signal_time(raw_item)
-                h1_zones.append(
-                    {
-                        "symbol": symbol,
-                        "timeframe": AUTO_EYE_H1_TIMEFRAME,
-                        "element_key": element_key,
-                        "id": element_id,
-                        "direction": direction,
-                        "status": status,
-                        "zone_low": min(zone_low, zone_high),
-                        "zone_high": max(zone_low, zone_high),
-                        "formation_time_utc": signal_time_utc,
-                    }
-                )
-
-        if len(h1_zones) == 0:
-            continue
-
-        best_event: AutoEyeElementEvent | None = None
-        for zone in h1_zones:
-            zone_low = float(zone["zone_low"])
-            zone_high = float(zone["zone_high"])
-            location, distance = classify_price_location(
-                price=price,
-                zone_low=zone_low,
-                zone_high=zone_high,
-            )
-            if location is None:
+            raw_elements_block = raw_timeframe.get("elements")
+            if not isinstance(raw_elements_block, dict):
                 continue
 
-            recommendation = build_auto_eye_recommendation(
-                trend_direction=trend_direction,
-                zone_direction=str(zone["direction"]),
-            )
-            trade_plan = build_auto_eye_trade_plan(
-                symbol=symbol,
-                entry_price=price,
-                zone_low=zone_low,
-                zone_high=zone_high,
-                direction=str(zone["direction"]),
-                current_element_id=str(zone["id"]),
-                tp_targets=h1_zones,
-            )
-            dedupe_key = (
-                f"{symbol}|{AUTO_EYE_H1_TIMEFRAME}|{zone['element_key']}|{zone['id']}|{location}"
-            )
+            for element_key in monitored_elements:
+                raw_items = raw_elements_block.get(element_key)
+                if element_key == "fractals" and not isinstance(raw_items, list):
+                    raw_items = raw_elements_block.get("fractal")
+                if not isinstance(raw_items, list):
+                    continue
 
-            event = AutoEyeElementEvent(
-                dedupe_key=dedupe_key,
-                symbol=symbol,
-                timeframe=AUTO_EYE_H1_TIMEFRAME,
-                element_key=str(zone["element_key"]),
-                element_id=str(zone["id"]),
-                direction=str(zone["direction"]),
-                status=str(zone["status"]),
-                formation_time_utc=(
-                    str(zone.get("formation_time_utc"))
-                    if zone.get("formation_time_utc")
-                    else None
-                ),
-                zone_low=zone_low,
-                zone_high=zone_high,
-                price=price,
-                location=location,
-                distance_to_zone=distance,
-                trend_direction=trend_direction,
-                recommendation=recommendation,
-                trade_direction=str(trade_plan["trade_direction"]),
-                entry_price=float(trade_plan["entry_price"]),
-                sl_price=float(trade_plan["sl_price"]),
-                tp_price=(
-                    float(trade_plan["tp_price"])
-                    if isinstance(trade_plan["tp_price"], (int, float))
-                    else None
-                ),
-                rr_ratio=(
-                    float(trade_plan["rr_ratio"])
-                    if isinstance(trade_plan["rr_ratio"], (int, float))
-                    else None
-                ),
-                profit_quote_per_lot=(
-                    float(trade_plan["profit_quote_per_lot"])
-                    if isinstance(trade_plan["profit_quote_per_lot"], (int, float))
-                    else None
-                ),
-                loss_quote_per_lot=float(trade_plan["loss_quote_per_lot"]),
-                quote_currency=(
-                    str(trade_plan["quote_currency"])
-                    if trade_plan.get("quote_currency")
-                    else None
-                ),
-                tp_target_type=(
-                    str(trade_plan["tp_target_type"])
-                    if trade_plan.get("tp_target_type")
-                    else None
-                ),
-                tp_target_id=(
-                    str(trade_plan["tp_target_id"])
-                    if trade_plan.get("tp_target_id")
-                    else None
-                ),
-            )
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        continue
 
-            if best_event is None:
-                best_event = event
-                continue
+                    element_id = str(raw_item.get("id") or "").strip()
+                    if not element_id:
+                        continue
 
-            current_signal = parse_utc_iso(event.formation_time_utc or "")
-            best_signal = parse_utc_iso(best_event.formation_time_utc or "")
-            current_sort = (
-                0 if event.location == "inside" else 1,
-                event.distance_to_zone,
-                -(current_signal.timestamp() if current_signal else 0.0),
-                event.element_id,
-            )
-            best_sort = (
-                0 if best_event.location == "inside" else 1,
-                best_event.distance_to_zone,
-                -(best_signal.timestamp() if best_signal else 0.0),
-                best_event.element_id,
-            )
-            if current_sort < best_sort:
-                best_event = event
+                    status = str(raw_item.get("status") or "").strip().lower()
+                    if not auto_eye_is_valid_h1_status(
+                        element_key=element_key,
+                        status=status,
+                    ):
+                        continue
 
-        if best_event is not None:
-            events_by_key[best_event.dedupe_key] = best_event
+                    zone_low, zone_high = parse_auto_eye_zone(raw_item, element_key)
+                    if zone_low is not None and zone_high is not None:
+                        normalized_low = min(zone_low, zone_high)
+                        normalized_high = max(zone_low, zone_high)
+                    else:
+                        normalized_low = None
+                        normalized_high = None
+
+                    dedupe_key = f"{symbol}|{timeframe}|{element_key}|{element_id}"
+                    events_by_key[dedupe_key] = AutoEyeElementEvent(
+                        dedupe_key=dedupe_key,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        element_key=element_key,
+                        element_id=element_id,
+                        direction=parse_auto_eye_direction(
+                            element_key=element_key,
+                            raw_item=raw_item,
+                        ),
+                        status=status,
+                        formation_time_utc=parse_auto_eye_signal_time(raw_item),
+                        zone_low=normalized_low,
+                        zone_high=normalized_high,
+                    )
 
     if not events_by_key:
         return []
@@ -1477,8 +1620,7 @@ def collect_new_auto_eye_events(state: BotState) -> list[AutoEyeElementEvent]:
     new_events.sort(
         key=lambda event: (
             event.symbol,
-            event.location,
-            event.distance_to_zone,
+            event.timeframe,
             event.element_key,
             event.element_id,
         )
@@ -1496,31 +1638,17 @@ def auto_eye_direction_label(direction: str) -> str:
     return mapping.get(direction.lower(), direction)
 
 
-def auto_eye_location_label(event: AutoEyeElementEvent) -> str:
-    if event.location == "inside":
-        return "цена внутри зоны"
-    if event.location == "near_above":
-        return f"цена выше зоны, рядом ({format_target(event.distance_to_zone)})"
-    if event.location == "near_below":
-        return f"цена ниже зоны, рядом ({format_target(event.distance_to_zone)})"
-    return event.location
-
-
 def render_auto_eye_event_text(event: AutoEyeElementEvent) -> str:
     element_label = AUTO_EYE_ELEMENT_LABELS.get(event.element_key, event.element_key.upper())
-    title = (
-        "<b>H1 опорная область: цена в зоне</b>"
-        if event.location == "inside"
-        else "<b>H1 опорная область: цена рядом</b>"
-    )
+    direction_value = auto_eye_direction_label(event.direction or "") if event.direction else "n/a"
 
     lines = [
-        title,
+        "<b>Новый элемент Auto-Eye</b>",
         f"<b>Актив:</b> <code>{html.escape(event.symbol)}</code>",
-        f"<b>Тренд H1:</b> <b>{html.escape(event.trend_direction)}</b>",
-        f"<b>Текущая цена:</b> <b>{format_target(event.price)}</b>",
-        f"<b>Местонахождение:</b> <b>{html.escape(auto_eye_location_label(event))}</b>",
-        f"<b>H1 зона:</b> <b>{html.escape(element_label)}</b> / <b>{html.escape(auto_eye_direction_label(event.direction))}</b>",
+        f"<b>Таймфрейм:</b> <b>{html.escape(event.timeframe)}</b>",
+        f"<b>Элемент:</b> <b>{html.escape(element_label)}</b>",
+        f"<b>Направление:</b> <b>{html.escape(direction_value)}</b>",
+        f"<b>Статус:</b> <b>{html.escape(event.status)}</b>",
     ]
 
     if event.zone_low is not None and event.zone_high is not None:
@@ -1532,39 +1660,6 @@ def render_auto_eye_event_text(event: AutoEyeElementEvent) -> str:
         lines.append(
             "<b>Сигнал зоны:</b> "
             f"<b>{html.escape(format_local_datetime(event.formation_time_utc))}</b>"
-        )
-
-    lines.append(f"<b>Рекомендация:</b> {html.escape(event.recommendation)}")
-
-    lines.append("")
-    lines.append("<b>Расчёт сделки (черновик)</b>")
-    lines.append(
-        f"<b>Направление:</b> <b>{'BUY' if event.trade_direction == 'long' else 'SELL'}</b>"
-    )
-    lines.append(f"<b>Entry:</b> <b>{format_target(event.entry_price)}</b>")
-    lines.append(f"<b>SL (за H1 зоной):</b> <b>{format_target(event.sl_price)}</b>")
-    if event.tp_price is not None:
-        lines.append(f"<b>TP (ближайший H1 RB/SNR/FVG):</b> <b>{format_target(event.tp_price)}</b>")
-    else:
-        lines.append("<b>TP (ближайший H1 RB/SNR/FVG):</b> <b>не найден</b>")
-
-    if event.rr_ratio is not None:
-        lines.append(f"<b>R:R:</b> <b>{event.rr_ratio:.2f}</b>")
-    if event.quote_currency:
-        quote = html.escape(event.quote_currency)
-        if event.profit_quote_per_lot is not None:
-            lines.append(
-                f"<b>Потенциал на 1 lot:</b> <b>{event.profit_quote_per_lot:.2f} {quote}</b>"
-            )
-        lines.append(
-            f"<b>Риск на 1 lot:</b> <b>{event.loss_quote_per_lot:.2f} {quote}</b>"
-        )
-
-    if event.tp_target_type and event.tp_target_id:
-        tp_type = AUTO_EYE_ELEMENT_LABELS.get(event.tp_target_type, event.tp_target_type.upper())
-        lines.append(
-            f"<b>TP-ориентир:</b> <b>{html.escape(tp_type)}</b> "
-            f"<code>{html.escape(event.tp_target_id)}</code>"
         )
 
     lines.append(f"<b>ID:</b> <code>{html.escape(event.element_id)}</code>")
@@ -1581,10 +1676,23 @@ async def send_auto_eye_notifications(bot: Bot, state: BotState) -> int:
 
     recipients = list(state.config.telegram.allowed_user_ids)
     sent_count = 0
+    delivered_events = 0
 
     for event in new_events:
+        event_recipients = [
+            user_id
+            for user_id in recipients
+            if state.auto_eye_subscription_store.is_event_enabled_for_user(
+                user_id=user_id,
+                event=event,
+            )
+        ]
+        if not event_recipients:
+            continue
+
         text = render_auto_eye_event_text(event)
-        for user_id in recipients:
+        delivered_events += 1
+        for user_id in event_recipients:
             try:
                 await bot.send_message(chat_id=user_id, text=text)
                 sent_count += 1
@@ -1596,8 +1704,9 @@ async def send_auto_eye_notifications(bot: Bot, state: BotState) -> int:
                 )
 
     logger.info(
-        "Auto-eye notifications sent: events=%s recipients=%s messages=%s",
+        "Auto-eye notifications sent: new_events=%s delivered_events=%s recipients=%s messages=%s",
         len(new_events),
+        delivered_events,
         len(recipients),
         sent_count,
     )
@@ -2190,11 +2299,21 @@ def build_home_keyboard(
     has_alerts: bool,
     *,
     has_backtest: bool,
+    has_auto_eye_notifications: bool,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="Обновить и проверить", callback_data=CALLBACK_REFRESH)],
         [InlineKeyboardButton(text="Меню алертов", callback_data=CALLBACK_MENU_ALERTS)],
     ]
+    if has_auto_eye_notifications:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Уведомления Auto-Eye",
+                    callback_data=CALLBACK_MENU_AUTO_EYE_NOTIFY,
+                )
+            ]
+        )
     if has_backtest:
         rows.append(
             [
@@ -2232,6 +2351,105 @@ def build_alerts_menu_keyboard(assets: list[str]) -> InlineKeyboardMarkup:
             rows.append(group_row)
 
     rows.append([InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_HOME)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_auto_eye_notify_assets(config: AppConfig, quotes: QuotesMap) -> list[str]:
+    return get_display_assets(config, quotes)
+
+
+def build_auto_eye_notify_menu_keyboard(
+    *,
+    selected_assets_count: int,
+    selected_elements_count: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Активы ({selected_assets_count})",
+                    callback_data=CALLBACK_AEN_MENU_ASSETS,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Элементы ({selected_elements_count})",
+                    callback_data=CALLBACK_AEN_MENU_ELEMENTS,
+                )
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_HOME)],
+        ]
+    )
+
+
+def build_auto_eye_notify_assets_keyboard(
+    assets: list[str],
+    *,
+    selected_assets: set[str],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    for group, group_assets in group_assets_for_ui(assets):
+        rows.append([InlineKeyboardButton(text=f"▾ {group} ▾", callback_data=CALLBACK_NOOP)])
+        group_row: list[InlineKeyboardButton] = []
+        for asset in group_assets:
+            checked = "☑" if auto_eye_symbol_key(asset) in selected_assets else "☐"
+            group_row.append(
+                InlineKeyboardButton(
+                    text=f"{checked} {asset}",
+                    callback_data=f"{CALLBACK_AEN_ASSET_PREFIX}{asset}",
+                )
+            )
+            if len(group_row) == 2:
+                rows.append(group_row)
+                group_row = []
+
+        if group_row:
+            rows.append(group_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="Выбрать все", callback_data=CALLBACK_AEN_ASSET_ALL),
+            InlineKeyboardButton(text="Снять все", callback_data=CALLBACK_AEN_ASSET_CLEAR),
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_AUTO_EYE_NOTIFY)]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_auto_eye_notify_elements_keyboard(
+    *,
+    selected_elements: set[str],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    options = list(AUTO_EYE_NOTIFY_ELEMENT_OPTIONS)
+
+    row: list[InlineKeyboardButton] = []
+    for key, label in options:
+        checked = "☑" if key in selected_elements else "☐"
+        row.append(
+            InlineKeyboardButton(
+                text=f"{checked} {label}",
+                callback_data=f"{CALLBACK_AEN_ELEMENT_PREFIX}{key}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="Выбрать все", callback_data=CALLBACK_AEN_ELEMENT_ALL),
+            InlineKeyboardButton(text="Снять все", callback_data=CALLBACK_AEN_ELEMENT_CLEAR),
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MENU_AUTO_EYE_NOTIFY)]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2752,6 +2970,24 @@ def get_backtest_assets(config: AppConfig, quotes: QuotesMap) -> list[str]:
     return assets
 
 
+def get_auto_eye_selected_asset_labels(
+    *,
+    assets_for_menu: list[str],
+    selected_asset_keys: set[str],
+) -> list[str]:
+    labels: list[str] = []
+    for asset in assets_for_menu:
+        if auto_eye_symbol_key(asset) in selected_asset_keys:
+            labels.append(asset)
+    return labels
+
+
+def get_auto_eye_selected_element_labels(selected_element_keys: set[str]) -> list[str]:
+    options_map = {key: label for key, label in AUTO_EYE_NOTIFY_ELEMENT_OPTIONS}
+    labels = [options_map[key] for key in options_map if key in selected_element_keys]
+    return labels
+
+
 def render_backtest_assets_menu_text() -> str:
     return (
         "<b>Бектест сценариев</b>\n\n"
@@ -2765,6 +3001,64 @@ def render_backtest_period_menu_text(asset: str) -> str:
         "Выберите период:\n"
         "• быстрый диапазон, или\n"
         "• свой интервал в формате <code>dd.mm.yyyy hh:mm - dd.mm.yyyy hh:mm</code>"
+    )
+
+
+def render_auto_eye_notify_menu_text(
+    *,
+    selected_assets: list[str],
+    selected_elements: list[str],
+) -> str:
+    assets_text = (
+        ", ".join(f"<code>{html.escape(asset)}</code>" for asset in selected_assets)
+        if selected_assets
+        else "не выбраны"
+    )
+    elements_text = (
+        ", ".join(f"<b>{html.escape(element)}</b>" for element in selected_elements)
+        if selected_elements
+        else "не выбраны"
+    )
+    is_active = bool(selected_assets and selected_elements)
+    status_text = "включены" if is_active else "выключены"
+
+    return "\n".join(
+        [
+            "<b>Уведомления Auto-Eye</b>",
+            "",
+            "Выберите активы и элементы, по которым должны приходить уведомления о новых элементах.",
+            "",
+            f"<b>Активы:</b> {assets_text}",
+            f"<b>Элементы:</b> {elements_text}",
+            f"<b>Статус:</b> <b>{status_text}</b>",
+            "",
+            "<i>Если элементы не выбраны, активы считаются невыбранными.</i>",
+        ]
+    )
+
+
+def render_auto_eye_notify_assets_text(*, selected_count: int, total_count: int) -> str:
+    return "\n".join(
+        [
+            "<b>Auto-Eye: выбор активов</b>",
+            "",
+            "Отметьте активы, по которым хотите получать уведомления.",
+            f"<i>Выбрано: {selected_count} из {total_count}</i>",
+        ]
+    )
+
+
+def render_auto_eye_notify_elements_text(*, selected_labels: list[str]) -> str:
+    selected_text = ", ".join(f"<b>{html.escape(label)}</b>" for label in selected_labels)
+    if not selected_text:
+        selected_text = "нет"
+    return "\n".join(
+        [
+            "<b>Auto-Eye: выбор элементов</b>",
+            "",
+            "Выберите типы элементов для уведомлений.",
+            f"<i>Выбрано: {selected_text}</i>",
+        ]
     )
 
 
@@ -4063,6 +4357,7 @@ async def send_dashboard_message(
         reply_markup=build_home_keyboard(
             has_alerts=bool(alerts),
             has_backtest=is_backtest_user_allowed(state, user_id),
+            has_auto_eye_notifications=state.config.telegram.auto_eye_notifications.enabled,
         ),
     )
     state.dashboard_message_ids[user_id] = (sent.chat.id, sent.message_id)
@@ -4076,6 +4371,77 @@ async def send_alerts_menu_message(message: Message, state: BotState) -> None:
     await message.answer(
         text=render_alerts_menu_text(chat_alerts),
         reply_markup=build_alerts_menu_keyboard(assets_for_menu),
+    )
+
+
+def build_auto_eye_notify_menu_payload(
+    state: BotState,
+    *,
+    user_id: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    assets_for_menu = get_auto_eye_notify_assets(state.config, state.last_quotes)
+    preference = state.auto_eye_subscription_store.get(user_id)
+    selected_asset_labels = get_auto_eye_selected_asset_labels(
+        assets_for_menu=assets_for_menu,
+        selected_asset_keys=preference.assets,
+    )
+    selected_element_labels = get_auto_eye_selected_element_labels(preference.elements)
+    text = render_auto_eye_notify_menu_text(
+        selected_assets=selected_asset_labels,
+        selected_elements=selected_element_labels,
+    )
+    keyboard = build_auto_eye_notify_menu_keyboard(
+        selected_assets_count=len(selected_asset_labels),
+        selected_elements_count=len(selected_element_labels),
+    )
+    return text, keyboard
+
+
+async def send_auto_eye_notify_menu_message(message: Message, state: BotState) -> None:
+    user_id = get_user_id_from_message(message)
+    text, keyboard = build_auto_eye_notify_menu_payload(state, user_id=user_id)
+    await message.answer(text=text, reply_markup=keyboard)
+
+
+async def edit_auto_eye_notify_menu_message(query: CallbackQuery, state: BotState) -> None:
+    user_id = get_user_id_from_query(query)
+    text, keyboard = build_auto_eye_notify_menu_payload(state, user_id=user_id)
+    await safe_edit_message(query, text=text, reply_markup=keyboard)
+
+
+async def edit_auto_eye_notify_assets_message(query: CallbackQuery, state: BotState) -> None:
+    user_id = get_user_id_from_query(query)
+    preference = state.auto_eye_subscription_store.get(user_id)
+    assets_for_menu = get_auto_eye_notify_assets(state.config, state.last_quotes)
+    selected_assets = {
+        auto_eye_symbol_key(asset)
+        for asset in assets_for_menu
+        if auto_eye_symbol_key(asset) in preference.assets
+    }
+    await safe_edit_message(
+        query,
+        text=render_auto_eye_notify_assets_text(
+            selected_count=len(selected_assets),
+            total_count=len(assets_for_menu),
+        ),
+        reply_markup=build_auto_eye_notify_assets_keyboard(
+            assets_for_menu,
+            selected_assets=selected_assets,
+        ),
+    )
+
+
+async def edit_auto_eye_notify_elements_message(query: CallbackQuery, state: BotState) -> None:
+    user_id = get_user_id_from_query(query)
+    preference = state.auto_eye_subscription_store.get(user_id)
+    await safe_edit_message(
+        query,
+        text=render_auto_eye_notify_elements_text(
+            selected_labels=get_auto_eye_selected_element_labels(preference.elements),
+        ),
+        reply_markup=build_auto_eye_notify_elements_keyboard(
+            selected_elements=preference.elements
+        ),
     )
 
 
@@ -4151,6 +4517,7 @@ async def edit_dashboard_message(
         reply_markup=build_home_keyboard(
             has_alerts=bool(alerts),
             has_backtest=is_backtest_user_allowed(state, user_id),
+            has_auto_eye_notifications=state.config.telegram.auto_eye_notifications.enabled,
         ),
     )
     if query.message is not None:
@@ -4365,6 +4732,134 @@ def build_router(state: BotState) -> Router:
         await query.answer()
         await edit_backtest_assets_menu_message(query, state)
 
+    @router.callback_query(F.data == CALLBACK_MENU_AUTO_EYE_NOTIFY)
+    async def menu_auto_eye_notify_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.pending_inputs.pop(user_id, None)
+        state.asset_delete_selection.pop(user_id, None)
+        state.alert_edit_sessions.pop(user_id, None)
+        await query.answer()
+        await edit_auto_eye_notify_menu_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_MENU_ASSETS)
+    async def auto_eye_notify_assets_menu_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+        await query.answer()
+        await edit_auto_eye_notify_assets_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_MENU_ELEMENTS)
+    async def auto_eye_notify_elements_menu_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+        await query.answer()
+        await edit_auto_eye_notify_elements_message(query, state)
+
+    @router.callback_query(F.data.startswith(CALLBACK_AEN_ASSET_PREFIX))
+    async def auto_eye_notify_toggle_asset_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        asset = (query.data or "").removeprefix(CALLBACK_AEN_ASSET_PREFIX).strip().upper()
+        user_id = get_user_id_from_query(query)
+        if asset:
+            state.auto_eye_subscription_store.toggle_asset(user_id, asset)
+        await query.answer()
+        await edit_auto_eye_notify_assets_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_ASSET_ALL)
+    async def auto_eye_notify_select_all_assets_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        assets_for_menu = get_auto_eye_notify_assets(state.config, state.last_quotes)
+        state.auto_eye_subscription_store.select_all_assets(user_id, assets_for_menu)
+        await query.answer("Выбраны все активы")
+        await edit_auto_eye_notify_assets_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_ASSET_CLEAR)
+    async def auto_eye_notify_clear_assets_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.auto_eye_subscription_store.clear_assets(user_id)
+        await query.answer("Активы сняты")
+        await edit_auto_eye_notify_assets_message(query, state)
+
+    @router.callback_query(F.data.startswith(CALLBACK_AEN_ELEMENT_PREFIX))
+    async def auto_eye_notify_toggle_element_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        element_key = (query.data or "").removeprefix(CALLBACK_AEN_ELEMENT_PREFIX).strip().lower()
+        user_id = get_user_id_from_query(query)
+        if element_key:
+            state.auto_eye_subscription_store.toggle_element(user_id, element_key)
+        await query.answer()
+        await edit_auto_eye_notify_elements_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_ELEMENT_ALL)
+    async def auto_eye_notify_select_all_elements_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.auto_eye_subscription_store.select_all_elements(user_id)
+        await query.answer("Выбраны все элементы")
+        await edit_auto_eye_notify_elements_message(query, state)
+
+    @router.callback_query(F.data == CALLBACK_AEN_ELEMENT_CLEAR)
+    async def auto_eye_notify_clear_elements_handler(query: CallbackQuery) -> None:
+        if not await ensure_callback_allowed(state, query):
+            return
+        if not state.config.telegram.auto_eye_notifications.enabled:
+            await query.answer("Уведомления Auto-Eye отключены", show_alert=False)
+            await edit_dashboard_message(query, state)
+            return
+
+        user_id = get_user_id_from_query(query)
+        state.auto_eye_subscription_store.clear_elements(user_id)
+        await query.answer("Элементы сняты")
+        await edit_auto_eye_notify_elements_message(query, state)
+
     @router.callback_query(F.data.startswith(CALLBACK_BACKTEST_ASSET_PREFIX))
     async def backtest_asset_handler(query: CallbackQuery) -> None:
         if not await ensure_callback_allowed(state, query):
@@ -4518,6 +5013,7 @@ def build_router(state: BotState) -> Router:
                 reply_markup=build_home_keyboard(
                     has_alerts=has_alerts,
                     has_backtest=is_backtest_user_allowed(state, user_id),
+                    has_auto_eye_notifications=state.config.telegram.auto_eye_notifications.enabled,
                 ),
             )
             return
@@ -5845,17 +6341,19 @@ def run(config_path: Path) -> None:
     auto_eye_seen_path = resolve_output_path(
         config.telegram.auto_eye_notifications.seen_ids_json
     )
+    auto_eye_subscriptions_path = resolve_auto_eye_subscriptions_path(config)
 
     logger.info(
-        "Auto-eye notifications config: enabled=%s state_dir=%s timeframes=%s elements=%s seen_store=%s",
+        "Auto-eye notifications config: enabled=%s state_dir=%s timeframes=%s elements=%s seen_store=%s subscriptions_store=%s",
         config.telegram.auto_eye_notifications.enabled,
         auto_eye_state_dir,
         ", ".join(config.telegram.auto_eye_notifications.timeframes),
         ", ".join(config.telegram.auto_eye_notifications.elements),
         auto_eye_seen_path,
+        auto_eye_subscriptions_path,
     )
     logger.info(
-        "Auto-eye mode: H1 price proximity alerts with trend and trade draft (SL behind H1 zone, TP to nearest H1 RB/SNR/FVG)"
+        "Auto-eye mode: new element notifications (FVG/RB/Fractal) filtered by per-user asset/element subscriptions"
     )
     logger.info(
         "Backtest config: enabled=%s allowed=%s max_interval_hours=%s warmup_bars=%s max_proposals_to_send=%s decisions_log_file=%s",
@@ -5879,6 +6377,7 @@ def run(config_path: Path) -> None:
         dashboard_message_ids={},
         auto_eye_state_dir=auto_eye_state_dir,
         auto_eye_seen_store=AutoEyeSeenStore(auto_eye_seen_path),
+        auto_eye_subscription_store=AutoEyeSubscriptionStore(auto_eye_subscriptions_path),
         backtest_tasks={},
     )
 

@@ -38,6 +38,7 @@ class AutoEyeNotificationsConfig:
     elements: list[str]
     state_dir: str
     seen_ids_json: str
+    subscriptions_json: str = "output/auto_eye_user_subscriptions.json"
 
 
 @dataclass
@@ -321,6 +322,12 @@ def load_config(config_path: Path) -> AppConfig:
                     auto_eye_notification_raw.get(
                         "seen_ids_json",
                         "output/auto_eye_notified_elements.json",
+                    )
+                ).strip(),
+                subscriptions_json=str(
+                    auto_eye_notification_raw.get(
+                        "subscriptions_json",
+                        "output/auto_eye_user_subscriptions.json",
                     )
                 ).strip(),
             ),
